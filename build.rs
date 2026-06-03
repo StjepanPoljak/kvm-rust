@@ -14,6 +14,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	.derive_default(true)
 	.allowlist_type("kvm_sregs2")
 	.allowlist_type("kvm_userspace_memory_region")
+	.allowlist_type("kvm_regs")
+	.allowlist_type("kvm_run")
 	.parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .generate_comments(false)
 	.generate()
