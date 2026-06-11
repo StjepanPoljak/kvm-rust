@@ -10,4 +10,4 @@ bindgen = "0.72"
 [dependencies]
 nix = { version = "0.31", features = ["ioctl", "fs"] }
 libc = "0.2"
-
+clap = { version = "4", features = ["derive"] }

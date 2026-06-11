@@ -2,6 +2,9 @@ use std::fs::OpenOptions;
 use std::os::unix::io::AsRawFd;
 use std::ptr;
 
+use std::fs::File;
+use std::io::{self, Read};
+
 include!(concat!(env!("OUT_DIR"), "/kvm-bindings.rs"));
 
 use libc::{
@@ -20,8 +23,30 @@ const KVM_SET_SREGS2 : u64 = _IOW::<kvm_sregs2>(KVMIO, 0xcd);
 const KVM_GET_REGS : u64 = _IOR::<kvm_regs>(KVMIO, 0x81);
 const KVM_SET_REGS : u64 = _IOW::<kvm_regs>(KVMIO, 0x82);
 const KVM_RUN : u64 = _IO(KVMIO, 0x80);
+use clap::Parser;
+
+#[derive(Parser, Debug)]
+#[command(version, about)]
+struct Args {
+    /// Binary to run
+    binary: String,
+
+    /// Memory size in kilobytes
+    #[arg(short, long, default_value_t = 256)]
+    memory: u64,
+}
+
+fn load_binary(path: &str) -> io::Result<Vec<u8>> {
+    let mut file = File::open(path)?;
+    let mut res = Vec::new();
+    file.read_to_end(&mut res)?;
+
+    Ok(res)
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::parse();
+
     let file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -33,7 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 140900 mmap(NULL, 1075838976, 0 /* PROT_NONE */, 0x22 /* MAP_PRIVATE|MAP_ANONYMOUS */, -1, 0) = 0x7768b3e00000
     // 140900 mmap(0x7768b3e00000, 1073741824, 0x3 /* PROT_READ|PROT_WRITE */, 0x32 /* MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS */, -1, 0) = 0x7768b3e00000
-    let mem_size: u64 = 256 * 1024;
+    let mem_size: u64 = args.memory * 1024;
     let mut mem: *mut libc::c_void = unsafe { libc::mmap(ptr::null_mut(), (mem_size + (1024 * 1024 * 2)) as usize, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) };
     mem = unsafe { libc::mmap(mem, mem_size as usize, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0) };
 
@@ -57,8 +82,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let kvm_run_size = unsafe { libc::ioctl(fd, KVM_GET_VCPU_MMAP_SIZE, 0usize) };
     let kvm_run_mem = unsafe { libc::mmap(ptr::null_mut(), kvm_run_size as usize, PROT_READ|PROT_WRITE, MAP_SHARED, vcpu_fd, 0) };
 
-    let mut sregs : kvm_sregs2;
     // 140904 ioctl(10<anon_inode:kvm-vcpu:0>, 0x8140aecc /* KVM_GET_SREGS2 */, 0x77690198f310) = 0
+    let mut sregs : kvm_sregs2;
     unsafe {
 	sregs = std::mem::zeroed();
 	libc::ioctl(vcpu_fd, KVM_GET_SREGS2, &mut sregs);
@@ -81,7 +106,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     regs.rip = 0x1000;
-    regs.rsp = 0x2000;
 
     println!("RIP={:#x} RSP={:#x} RFLAGS={:#x}", regs.rip, regs.rsp, regs.rflags);
 
@@ -89,7 +113,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	libc::ioctl(vcpu_fd, KVM_SET_REGS, &mut regs)
     };
 
-    let code = [0xF4];
+    let code = load_binary(args.binary.as_str())?;
 
     unsafe {
 	std::ptr::copy_nonoverlapping(
