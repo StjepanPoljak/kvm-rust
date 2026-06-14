@@ -42,7 +42,8 @@ fn load_binary(path: &str) -> io::Result<Vec<u8>> {
 }
 
 pub struct KvmDev {
-    pub file: File
+    pub file: File,
+    pub kvm_run_size: usize
 }
 
 impl KvmDev {
@@ -52,11 +53,18 @@ impl KvmDev {
             .write(true)
             .open("/dev/kvm")
             .expect("Failed to open /dev/kvm");
-        Ok(Self { file })
+
+        // 140904 ioctl(3</dev/kvm<char 10:232>>, 0xae04 /* KVM_GET_VCPU_MMAP_SIZE */, 0) = 12288
+        let kvm_run_size = unsafe { libc::ioctl(file.as_raw_fd(), KVM_GET_VCPU_MMAP_SIZE, 0usize) };
+        if kvm_run_size < 0 {
+            return Err(Box::new(io::Error::last_os_error()));
+        }
+        
+        Ok(Self { file, kvm_run_size: kvm_run_size as usize })
     }
 
     fn create_vm(&self) -> Result<VM, Box<dyn std::error::Error>> {
-	// 140900 ioctl(3</dev/kvm<char 10:232>>, 0xae01 /* KVM_CREATE_VM */, 0) = 9<anon_inode:kvm-vm>
+        // 140900 ioctl(3</dev/kvm<char 10:232>>, 0xae01 /* KVM_CREATE_VM */, 0) = 9<anon_inode:kvm-vm>
         let vm_fd = unsafe { libc::ioctl(self.fd(), KVM_CREATE_VM, 0usize) };
         if vm_fd < 0 {
             return Err(Box::new(io::Error::last_os_error()));
@@ -67,6 +75,10 @@ impl KvmDev {
 
     fn fd(&self) -> libc::c_int {
         self.file.as_raw_fd()
+    }
+
+    fn get_kvm_run_size(&self) -> usize {
+        self.kvm_run_size
     }
 }
 
@@ -94,7 +106,7 @@ impl VM {
             return Err(Box::new(io::Error::last_os_error()));
         }
 
-        Ok(VCPU { fd: vcpu_fd })
+        Ok( VCPU { fd: vcpu_fd, kvm_run_mem: std::ptr::null_mut() } )
     }
 
     fn create_mem_region(&self, mem_size: usize, guest_phys_addr: u64) -> Result<MemRegion, Box<dyn std::error::Error>> {
@@ -137,7 +149,90 @@ impl Drop for VM {
 }
 
 pub struct VCPU {
-    pub fd: libc::c_int
+    pub fd: libc::c_int,
+    pub kvm_run_mem: *mut libc::c_void
+}
+
+impl kvm_regs {
+    fn print(&self) {
+        println!("RIP={:#x} RSP={:#x} RFLAGS={:#x}",
+                 self.rip, self.rsp, self.rflags);
+    }
+}
+
+impl kvm_sregs2 {
+    fn print(&self) {
+        println!("CS\tbase={:#x}\n\tselector={:#x}",
+                 self.cs.base, self.cs.selector);
+        println!("DS\tbase={:#x}\n\tselector={:#x}",
+                 self.ds.base, self.ds.selector);
+    }
+}
+
+impl VCPU {
+    fn set_kvm_run_mem(&mut self, kvm_run_size: usize) -> Result<(), Box<dyn std::error::Error>> {
+        // 140904 mmap(NULL, 12288, 0x3 /* PROT_READ|PROT_WRITE */, 0x1 /* MAP_SHARED */, 10<anon_inode:kvm-vcpu:0>, 0) = 0x7769050b0000
+        self.kvm_run_mem = unsafe {
+            libc::mmap(ptr::null_mut(),
+                       kvm_run_size as usize,
+                       libc::PROT_READ|libc::PROT_WRITE,
+                       libc::MAP_SHARED,
+                       self.fd,
+                       0)
+        };
+        if self.kvm_run_mem == libc::MAP_FAILED {
+            return Err(Box::new(io::Error::last_os_error()));
+        }
+        Ok(())
+    }
+
+    fn get_sregs2(&mut self) -> Result<kvm_sregs2, Box<dyn std::error::Error>> {
+        let mut sregs2 = unsafe { std::mem::zeroed() };
+        // 140904 ioctl(10<anon_inode:kvm-vcpu:0>, 0x8140aecc /* KVM_GET_SREGS2 */, 0x77690198f310) = 0
+        let ret = unsafe {
+            libc::ioctl(self.fd, KVM_GET_SREGS2, &mut sregs2)
+        };
+        if ret < 0 {
+            return Err(Box::new(io::Error::last_os_error()));
+        }
+
+        Ok(sregs2)
+    }
+
+    fn set_sregs2(&self, sregs2: kvm_sregs2) -> Result<(), Box<dyn std::error::Error>> {
+        let ret = unsafe {
+            libc::ioctl(self.fd, KVM_SET_SREGS2, &sregs2)
+        };
+        if ret < 0 {
+            return Err(Box::new(io::Error::last_os_error()));
+        }
+
+        Ok(())
+    }
+    
+    fn get_regs(&mut self) -> Result<kvm_regs, Box<dyn std::error::Error>> {
+        let mut regs = unsafe { std::mem::zeroed() };
+        // 140904 ioctl(10<anon_inode:kvm-vcpu:0>, 0x8090ae81 /* KVM_GET_REGS */, {rax=0, ..., rsp=0, rbp=0, ..., rip=0xfff0, rflags=0x2}) = 0
+        let ret = unsafe {
+            libc::ioctl(self.fd, KVM_GET_REGS, &mut regs)
+        };
+        if ret < 0 {
+            return Err(Box::new(io::Error::last_os_error()));
+        }
+
+        Ok(regs)
+    }
+
+    fn set_regs(&self, regs: kvm_regs) -> Result<(), Box<dyn std::error::Error>> {
+        let ret = unsafe {
+            libc::ioctl(self.fd, KVM_SET_REGS, &regs)
+        };
+        if ret < 0 {
+            return Err(Box::new(io::Error::last_os_error()));
+        }
+
+        Ok(())
+    }
 }
 
 impl Drop for VCPU {
@@ -152,43 +247,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let kvm_dev = KvmDev::new()?;
     let vm = kvm_dev.create_vm()?;
     let mem_region = vm.create_mem_region(args.memory * 1024, 0x0)?;
-    let vcpu = vm.create_vcpu()?;
+    let mut vcpu = vm.create_vcpu()?;
+    vcpu.set_kvm_run_mem(kvm_dev.get_kvm_run_size())?;
 
-    // 140904 ioctl(3</dev/kvm<char 10:232>>, 0xae04 /* KVM_GET_VCPU_MMAP_SIZE */, 0) = 12288
-    // 140904 mmap(NULL, 12288, 0x3 /* PROT_READ|PROT_WRITE */, 0x1 /* MAP_SHARED */, 10<anon_inode:kvm-vcpu:0>, 0) = 0x7769050b0000
-    let kvm_run_size = unsafe { libc::ioctl(kvm_dev.fd(), KVM_GET_VCPU_MMAP_SIZE, 0usize) };
-    let kvm_run_mem = unsafe { libc::mmap(ptr::null_mut(), kvm_run_size as usize, libc::PROT_READ|libc::PROT_WRITE, libc::MAP_SHARED, vcpu.fd, 0) };
+    let mut sregs2 = vcpu.get_sregs2()?;
+    sregs2.cs.base = 0;
+    sregs2.cs.selector = 0;
+    sregs2.print();
+    vcpu.set_sregs2(sregs2)?;
 
-    // 140904 ioctl(10<anon_inode:kvm-vcpu:0>, 0x8140aecc /* KVM_GET_SREGS2 */, 0x77690198f310) = 0
-    let mut sregs : kvm_sregs2;
-    unsafe {
-        sregs = std::mem::zeroed();
-        libc::ioctl(vcpu.fd, KVM_GET_SREGS2, &mut sregs);
-    }
-
-    sregs.cs.base = 0;
-    sregs.cs.selector = 0;
-
-    println!("CS\tbase={:#x}\n\tselector={:#x}\nCR0={:#x}", sregs.cs.base, sregs.cs.selector, sregs.cr0);
-
-    unsafe {
-        libc::ioctl(vcpu.fd, KVM_SET_SREGS2, &mut sregs);
-    }
-
-    // 140904 ioctl(10<anon_inode:kvm-vcpu:0>, 0x8090ae81 /* KVM_GET_REGS */, {rax=0, ..., rsp=0, rbp=0, ..., rip=0xfff0, rflags=0x2}) = 0
-    let mut regs : kvm_regs;
-    unsafe {
-        regs = std::mem::zeroed();
-        libc::ioctl(vcpu.fd, KVM_GET_REGS, &mut regs);
-    }
-
+    let mut regs = vcpu.get_regs()?;
     regs.rip = 0x1000;
-
-    println!("RIP={:#x} RSP={:#x} RFLAGS={:#x}", regs.rip, regs.rsp, regs.rflags);
-
-    unsafe {
-        libc::ioctl(vcpu.fd, KVM_SET_REGS, &mut regs)
-    };
+    regs.print();
+    vcpu.set_regs(regs)?;
 
     let code = load_binary(args.binary.as_str())?;
 
@@ -204,7 +275,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         libc::ioctl(vcpu.fd, KVM_RUN, 0usize)
     };
 
-    let exit_reason = unsafe { (*(kvm_run_mem as *mut kvm_run)).exit_reason };
+    let exit_reason = unsafe { (*(vcpu.kvm_run_mem as *mut kvm_run)).exit_reason };
 
     println!("EXIT REASON = {}", exit_reason);
 
