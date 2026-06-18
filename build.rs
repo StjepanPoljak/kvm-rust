@@ -15,6 +15,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .generate()?
         .write_to_file(out_path.join("kvm-bindings.rs"))?;
 
+    bindgen::Builder::default()
+        .header("/usr/include/x86_64-linux-gnu/asm/bootparam.h")
+        .allowlist_type("boot_params")
+        .blocklist_type("__u8")
+        .blocklist_type("__u16")
+        .blocklist_type("__u32")
+        .blocklist_type("__u64")
+        .generate_comments(false)
+        .generate()?
+        .write_to_file(out_path.join("bootparam-bindings.rs"))?;
+
     Ok(())
 }
 
