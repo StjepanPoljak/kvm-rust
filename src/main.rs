@@ -6,33 +6,6 @@ use std::fs::File;
 use std::io::{self, Read};
 
 include!(concat!(env!("OUT_DIR"), "/kvm-bindings.rs"));
-include!(concat!(env!("OUT_DIR"), "/bootparam-bindings.rs"));
-
-fn le16(b: &[u8], o: usize) -> u16 {
-    u16::from_le_bytes([b[o], b[o + 1]])
-}
-
-fn le32(b: &[u8], o: usize) -> u32 {
-    u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
-}
-
-fn wle16(b: &mut [u8], o: usize, val: u16) -> () {
-    b[o..(o + 2)].copy_from_slice(&val.to_le_bytes());
-}
-
-fn wle32(b: &mut [u8], o: usize, val: u32) -> () {
-    b[o..(o + 4)].copy_from_slice(&val.to_le_bytes());
-}
-
-fn read_string(b: &[u8], o: usize) -> io::Result<String> {
-    let end = b[o..]
-        .iter()
-        .position(|&c| c == 0).ok_or(io::Error::other("Could not extract string."))?;
-    let res = std::str::from_utf8(&b[o..(o + end)])
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
-        .to_string();
-    Ok(res)
-}
 
 use libc::{
     _IOW, _IO, _IOR
@@ -185,55 +158,6 @@ impl VM {
 
         self.load_data_to_memory(mem_region_idx, res, addr)
     }
-
-    fn load_linux(&self, path: &str, cmdline: &str) -> io::Result<()> {
-        let mut file = File::open(path)?;
-        let mut res = Vec::new();
-        file.read_to_end(&mut res)?;
-
-        if &res[0x202..(0x202+4)] != "HdrS".as_bytes().to_vec() {
-            return Err(io::Error::other("Unknown Linux kernel image."));
-        }
-
-        println!("Detected Linux kernel image.");
-
-        let prot = le16(&res, 0x206);
-        if prot < 0x202 {
-            return Err(io::Error::other(format!("Unsupported protocol version: {:#x}.", prot)));
-        }
-
-        let real_addr    = 0x10000;
-        let cmdline_addr = 0x20000;
-        let prot_addr    = 0x100000;
-
-        println!("Boot protocol version: {:#x}.", prot);
-
-        let kern_v_str = read_string(&res, (le16(&res, 0x20e) + 0x200) as usize)?;
-
-        println!("Linux kernel {}", kern_v_str);
-
-        if prot >= 0x202 {
-            wle32(&mut res, 0x228, cmdline_addr);
-        }
-
-        if prot >= 0x200 {
-            res[0x210] = 0xB0;
-        }
-
-        /* heap */
-        if prot >= 0x201 {
-            res[0x211] |= 0x80;
-            wle16(&mut res, 0x224, (cmdline_addr - real_addr - 0x200).try_into().unwrap());
-        }
-
-        let mut setup_size = res[0x1f1] as usize;
-        if setup_size == 0 {
-            setup_size = 4;
-        }
-        setup_size = (setup_size + 1) * 512;
-
-        Ok(())
-    }
 }
 
 impl Drop for VM {
@@ -372,30 +296,11 @@ impl Drop for VCPU {
 
 fn main() -> io::Result<()> {
     let args = Args::parse();
-
-    if args.binary.ends_with(".bin") {
-        let mut file = File::open(args.binary)?;
-        let mut res = Vec::new();
-        file.read_to_end(&mut res)?;
-
-        let sregs2 = unsafe {
-            std::ptr::read_unaligned(res.as_ptr() as *const kvm_sregs2)
-        };
-
-        sregs2.print();
-
-        return Ok(());
-    }
-
     let kvm_dev = KvmDev::new()?;
     let mut vm = kvm_dev.create_vm()?;
     let mem_region_idx = vm.add_mem_region(args.memory * 1024, 0x0)?;
     let mut vcpu = vm.create_vcpu()?;
     vcpu.set_kvm_run_mem(kvm_dev.get_kvm_run_size())?;
-
-//    vm.load_linux(&args.binary, "console=ttyS0")?;
-
-//    return Ok(());
 
     let mut sregs2 = vcpu.get_sregs2()?;
     sregs2.cs.base = 0;
@@ -411,58 +316,34 @@ fn main() -> io::Result<()> {
     vm.load_file_to_memory(mem_region_idx, &args.binary, regs.rip as usize)?;
 
     loop {
-            unsafe {
-                libc::ioctl(vcpu.fd, KVM_RUN, 0usize)
-            };
+        unsafe { libc::ioctl(vcpu.fd, KVM_RUN, 0usize) };
+        let run = unsafe { *(vcpu.kvm_run_mem as *mut kvm_run) };
 
-            let run = unsafe { *(vcpu.kvm_run_mem as *mut kvm_run) };
-
-            if run.exit_reason == KVM_EXIT_IO {
-                let io = unsafe { run.__bindgen_anon_1.io };
-                let port = io.port;
-                let direction = io.direction;
-                let size = io.size;
-                let data_offset = io.data_offset;
-
-                if direction == 0 {
-
-                println!("IO EXIT: port=0x{:x}, dir={}, size={}",
-                         port, direction, size);
-                    let base = vcpu.kvm_run_mem as *const u8;
-
-                    let data_ptr = unsafe {
-                        base.add(io.data_offset as usize)
-                    };
-
-                    let value = unsafe {
-                        *(data_ptr as *const u16)
-                    };
-
-                    print!("{}", value);
-                }
-
-                //              println!("OUTW 0xFF <- 0x{:04x}", value);
-            } else if run.exit_reason == KVM_EXIT_SHUTDOWN {
-                return Ok(());
-	    } else if run.exit_reason == KVM_EXIT_MMIO {
+        match run.exit_reason {
+            KVM_EXIT_MMIO => {
                 let mmio = unsafe { run.__bindgen_anon_1.mmio };
                 let phys_addr = mmio.phys_addr;
                 let data = mmio.data;
                 let len = mmio.len;
                 let is_write = mmio.is_write;
-		for i in 0..len {
-		    print!("{}", data[i as usize] as char);
-		}
-	    } else if run.exit_reason == KVM_EXIT_HLT {
+                for i in 0..len {
+                    print!("{}", data[i as usize] as char);
+                } }
+            KVM_EXIT_HLT => {
                 println!("Guest halted.");
-		break;
-	    } else if run.exit_reason == KVM_EXIT_INTERNAL_ERROR {
-		return Err(io::Error::other("KVM internal error."));
-            } else {
+                break; }
+            KVM_EXIT_SHUTDOWN => {
+                println!("Guest shutdown.");
+                break; }
+            KVM_EXIT_INTERNAL_ERROR => {
+                return Err(io::Error::other("KVM internal error.")); }
+            _ => {
                 println!("EXIT REASON = {}", run.exit_reason);
             }
+        }
     }
-    let mut regs = vcpu.get_regs()?;
-    regs.print();
+
+    vcpu.get_regs()?.print();
+
     Ok(())
 }
