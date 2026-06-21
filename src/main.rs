@@ -172,9 +172,13 @@ pub struct VCPU {
 }
 
 impl kvm_regs {
+
     fn print(&self) {
-        println!("RIP={:#x} RSP={:#x} RFLAGS={:#x}",
-                 self.rip, self.rsp, self.rflags);
+	println!("RAX={:#x}\tRBX={:#x}\tRCX={:#x}\tRDX={:#x}", self.rax, self.rbx, self.rcx, self.rdx);
+	println!("RSI={:#x}\tRDI={:#x}\tRSP={:#x}\tRBP={:#x}", self.rsi, self.rdi, self.rsp, self.rbp);
+	println!("R8={:#x}\tR9={:#x}\tR10={:#x}\tR11={:#x}", self.r8, self.r9, self.r10, self.r11);
+	println!("R12={:#x}\tR13={:#x}\tR14={:#x}\tR15={:#x}", self.r12, self.r13, self.r14, self.r15);
+        println!("RIP={:#x}\tRFLAGS={:#x}", self.rip, self.rflags);
     }
 }
 
@@ -315,13 +319,19 @@ fn main() -> io::Result<()> {
 
     vm.load_file_to_memory(mem_region_idx, &args.binary, regs.rip as usize)?;
 
-    loop {
-        unsafe { libc::ioctl(vcpu.fd, KVM_RUN, 0usize) };
-        let run = unsafe { *(vcpu.kvm_run_mem as *mut kvm_run) };
+    let run = vcpu.kvm_run_mem as *mut kvm_run;
 
-        match run.exit_reason {
+    loop {
+        let ret = unsafe { libc::ioctl(vcpu.fd, KVM_RUN, 0usize) };
+	if ret < 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+	let exit_reason = unsafe { (*run).exit_reason };
+
+        match exit_reason {
             KVM_EXIT_MMIO => {
-                let mmio = unsafe { run.__bindgen_anon_1.mmio };
+                let mmio = unsafe { (*run).__bindgen_anon_1.mmio };
                 let phys_addr = mmio.phys_addr;
                 let data = mmio.data;
                 let len = mmio.len;
@@ -338,7 +348,7 @@ fn main() -> io::Result<()> {
             KVM_EXIT_INTERNAL_ERROR => {
                 return Err(io::Error::other("KVM internal error.")); }
             _ => {
-                println!("EXIT REASON = {}", run.exit_reason);
+                println!("EXIT REASON = {}", exit_reason);
             }
         }
     }
