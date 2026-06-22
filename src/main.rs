@@ -249,8 +249,11 @@ pub struct VCPU {
 
 impl kvm_regs {
     fn print(&self) {
-        println!("RIP={:#x} RSP={:#x} RFLAGS={:#x}",
-                 self.rip, self.rsp, self.rflags);
+       println!("RAX={:#x}\tRBX={:#x}\tRCX={:#x}\tRDX={:#x}", self.rax, self.rbx, self.rcx, self.rdx);
+       println!("RSI={:#x}\tRDI={:#x}\tRSP={:#x}\tRBP={:#x}", self.rsi, self.rdi, self.rsp, self.rbp);
+       println!("R8={:#x}\tR9={:#x}\tR10={:#x}\tR11={:#x}", self.r8, self.r9, self.r10, self.r11);
+       println!("R12={:#x}\tR13={:#x}\tR14={:#x}\tR15={:#x}", self.r12, self.r13, self.r14, self.r15);
+       println!("RIP={:#x}\tRFLAGS={:#x}", self.rip, self.rflags);
     }
 }
 
@@ -372,25 +375,11 @@ impl Drop for VCPU {
 
 fn main() -> io::Result<()> {
     let args = Args::parse();
-
-    if args.binary.ends_with(".bin") {
-        let mut file = File::open(args.binary)?;
-        let mut res = Vec::new();
-        file.read_to_end(&mut res)?;
-
-        let sregs2 = unsafe {
-            std::ptr::read_unaligned(res.as_ptr() as *const kvm_sregs2)
-        };
-
-        sregs2.print();
-
-        return Ok(());
-    }
-
     let kvm_dev = KvmDev::new()?;
     let mut vm = kvm_dev.create_vm()?;
     let mem_region_idx = vm.add_mem_region(args.memory * 1024, 0x0)?;
     let mut vcpu = vm.create_vcpu()?;
+
     vcpu.set_kvm_run_mem(kvm_dev.get_kvm_run_size())?;
 
 //    vm.load_linux(&args.binary, "console=ttyS0")?;
@@ -410,58 +399,57 @@ fn main() -> io::Result<()> {
 
     vm.load_file_to_memory(mem_region_idx, &args.binary, regs.rip as usize)?;
 
+
+    let run = vcpu.kvm_run_mem as *mut kvm_run;
+
+
     loop {
-            unsafe {
-                libc::ioctl(vcpu.fd, KVM_RUN, 0usize)
-            };
+        let ret = unsafe { libc::ioctl(vcpu.fd, KVM_RUN, 0usize) };
+        if ret < 0 {
+            return Err(io::Error::last_os_error());
+        }
 
-            let run = unsafe { *(vcpu.kvm_run_mem as *mut kvm_run) };
+        let exit_reason = unsafe { (*run).exit_reason };
 
-            if run.exit_reason == KVM_EXIT_IO {
-                let io = unsafe { run.__bindgen_anon_1.io };
+        match exit_reason {
+            KVM_EXIT_IO => {
+                let io = unsafe { (*run).__bindgen_anon_1.io };
                 let port = io.port;
                 let direction = io.direction;
                 let size = io.size;
                 let data_offset = io.data_offset;
 
                 if direction == 0 {
-
-                println!("IO EXIT: port=0x{:x}, dir={}, size={}",
-                         port, direction, size);
+                    println!("IO EXIT: port=0x{:x}, dir={}, size={}",
+                             port, direction, size);
                     let base = vcpu.kvm_run_mem as *const u8;
-
-                    let data_ptr = unsafe {
-                        base.add(io.data_offset as usize)
-                    };
-
-                    let value = unsafe {
-                        *(data_ptr as *const u16)
-                    };
-
+                    let data_ptr = unsafe { base.add(io.data_offset as usize) };
+                    let value = unsafe { *(data_ptr as *const u16) };
                     print!("{}", value);
-                }
-
-                //              println!("OUTW 0xFF <- 0x{:04x}", value);
-            } else if run.exit_reason == KVM_EXIT_SHUTDOWN {
-                return Ok(());
-	    } else if run.exit_reason == KVM_EXIT_MMIO {
-                let mmio = unsafe { run.__bindgen_anon_1.mmio };
+                } }
+            KVM_EXIT_SHUTDOWN => {
+                println!("Guest shutdown.");
+                break; }
+            KVM_EXIT_MMIO => {
+                let mmio = unsafe { (*run).__bindgen_anon_1.mmio };
                 let phys_addr = mmio.phys_addr;
                 let data = mmio.data;
                 let len = mmio.len;
                 let is_write = mmio.is_write;
-		for i in 0..len {
-		    print!("{}", data[i as usize] as char);
-		}
-	    } else if run.exit_reason == KVM_EXIT_HLT {
+                for i in 0..len {
+                    print!("{}", data[i as usize] as char);
+                } }
+            KVM_EXIT_HLT => {
                 println!("Guest halted.");
-		break;
-	    } else if run.exit_reason == KVM_EXIT_INTERNAL_ERROR {
-		return Err(io::Error::other("KVM internal error."));
-            } else {
-                println!("EXIT REASON = {}", run.exit_reason);
+                break; }
+            KVM_EXIT_INTERNAL_ERROR => {
+                return Err(io::Error::other("KVM internal error.")); }
+            _ => {
+                println!("EXIT REASON = {}", exit_reason);
             }
+        }
     }
+
     let mut regs = vcpu.get_regs()?;
     regs.print();
     Ok(())
