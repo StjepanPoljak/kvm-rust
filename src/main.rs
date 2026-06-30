@@ -5,6 +5,7 @@ use clap::Parser;
 use std::fs::File;
 use std::io::{self, Read};
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 include!(concat!(env!("OUT_DIR"), "/kvm-bindings.rs"));
 //include!(concat!(env!("OUT_DIR"), "/bootparam-bindings.rs"));
@@ -48,8 +49,17 @@ const KVM_SET_USER_MEMORY_REGION : u64 = _IOW::<kvm_userspace_memory_region>(KVM
 const KVM_GET_SREGS2 : u64 = _IOR::<kvm_sregs2>(KVMIO, 0xcc);
 #[cfg(target_arch = "x86_64")]
 const KVM_SET_SREGS2 : u64 = _IOW::<kvm_sregs2>(KVMIO, 0xcd);
+#[cfg(target_arch = "x86_64")]
 const KVM_GET_REGS : u64 = _IOR::<kvm_regs>(KVMIO, 0x81);
+#[cfg(target_arch = "x86_64")]
 const KVM_SET_REGS : u64 = _IOW::<kvm_regs>(KVMIO, 0x82);
+
+#[cfg(target_arch = "aarch64")]
+const KVM_ARM_VCPU_INIT : u64 = _IOW::<kvm_one_reg>(KVMIO, 0xae);
+#[cfg(target_arch = "aarch64")]
+const KVM_GET_ONE_REG : u64 = _IOW::<kvm_one_reg>(KVMIO, 0xab);
+#[cfg(target_arch = "aarch64")]
+const KVM_SET_ONE_REG : u64 = _IOW::<kvm_one_reg>(KVMIO, 0xac);
 const KVM_RUN : u64 = _IO(KVMIO, 0x80);
 
 const KVM_EXIT_IO : u32 = 2;
@@ -63,6 +73,7 @@ const KVM_REG_SIZE_U64 : u64 = 0x0030000000000000;
 const KVM_REG_ARM_COPROC_SHIFT : u64 = 16;
 const KVM_REG_ARM_CORE : u64 = 0x0010 << KVM_REG_ARM_COPROC_SHIFT;
 
+#[cfg(target_arch = "aarch64")]
 fn AARCH64_CORE_REG(name: &str) -> io::Result<u64> {
     let base = KVM_REG_ARM64 | KVM_REG_SIZE_U64 | KVM_REG_ARM_CORE;
     if name.starts_with("x") {
@@ -81,6 +92,7 @@ fn AARCH64_CORE_REG(name: &str) -> io::Result<u64> {
     Err(io::Error::other("Invalid register."))
 }
 
+#[cfg(target_arch = "aarch64")]
 fn load_regs_hash() -> io::Result<HashMap<String, u64>> {
     let mut res = HashMap::<String, u64>::new();
     let mut regs = ((0..30).map(|x| format!("x{x}")).collect::<Vec<String>>());
@@ -91,6 +103,11 @@ fn load_regs_hash() -> io::Result<HashMap<String, u64>> {
     }
     Ok(res)
 }
+
+#[cfg(target_arch = "aarch64")]
+static REGS: LazyLock<HashMap<String, u64>> = LazyLock::new(|| {
+    load_regs_hash().expect("Failed to load register hash.")
+});
 
 #[derive(Parser, Debug)]
 #[command(version, about)]
@@ -284,18 +301,14 @@ pub struct VCPU {
     pub kvm_run_mem: *mut libc::c_void
 }
 
+#[cfg(target_arch = "x86_64")]
 impl kvm_regs {
-    #[cfg(target_arch = "x86_64")]
     fn print(&self) {
        println!("RAX={:#x}\tRBX={:#x}\tRCX={:#x}\tRDX={:#x}", self.rax, self.rbx, self.rcx, self.rdx);
        println!("RSI={:#x}\tRDI={:#x}\tRSP={:#x}\tRBP={:#x}", self.rsi, self.rdi, self.rsp, self.rbp);
        println!("R8={:#x}\tR9={:#x}\tR10={:#x}\tR11={:#x}", self.r8, self.r9, self.r10, self.r11);
        println!("R12={:#x}\tR13={:#x}\tR14={:#x}\tR15={:#x}", self.r12, self.r13, self.r14, self.r15);
        println!("RIP={:#x}\tRFLAGS={:#x}", self.rip, self.rflags);
-    }
-    #[cfg(target_arch = "aarch64")]
-    fn print(&self) {
-        println!("Not implemented.");
     }
 }
 
@@ -315,7 +328,6 @@ impl kvm_dtable {
         println!("{name}\tbase={:#x}\tlimit={:#x}\n", self.base, self.limit);
     }
 }
-
 
 #[cfg(target_arch = "x86_64")]
 impl kvm_sregs2 {
@@ -389,7 +401,8 @@ impl VCPU {
 
         Ok(())
     }
-    
+
+    #[cfg(target_arch = "x86_64")]
     fn get_regs(&mut self) -> io::Result<kvm_regs> {
         let mut regs = unsafe { std::mem::zeroed() };
         // 140904 ioctl(10<anon_inode:kvm-vcpu:0>, 0x8090ae81 /* KVM_GET_REGS */, {rax=0, ..., rsp=0, rbp=0, ..., rip=0xfff0, rflags=0x2}) = 0
@@ -403,6 +416,7 @@ impl VCPU {
         Ok(regs)
     }
 
+    #[cfg(target_arch = "x86_64")]
     fn set_regs(&self, regs: kvm_regs) -> io::Result<()> {
         let ret = unsafe {
             libc::ioctl(self.fd, KVM_SET_REGS, &regs)
@@ -411,6 +425,34 @@ impl VCPU {
             return Err(io::Error::last_os_error());
         }
 
+        Ok(())
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn get_one_reg(&mut self, name: &str) -> io::Result<kvm_one_reg> {
+        let mut val : u64 = 0;
+        let mut reg : kvm_one_reg = unsafe { std::mem::zeroed() };
+
+        reg.id = *REGS.get(name).ok_or(io::Error::other("Invalid register name."))?;
+        reg.addr = &mut val as *mut u64 as u64;
+
+        let ret = unsafe {
+            libc::ioctl(self.fd, KVM_GET_ONE_REG, &mut reg)
+        };
+        if ret < 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        Ok(reg)
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn vcpu_arm_init(&self) -> io::Result<()> {
+        let mut vcpu_init : kvm_vcpu_init = unsafe { std::mem::zeroed() };
+        let ret = unsafe { libc::ioctl(self.fd, KVM_ARM_VCPU_INIT, &mut vcpu_init) };
+        if ret < 0 {
+            return Err(io::Error::last_os_error());
+        }
         Ok(())
     }
 }
@@ -440,17 +482,15 @@ fn arch_init(vm: &mut VM, vcpu: &mut VCPU, mem_region_idx: usize, args: &Args) -
 
 #[cfg(target_arch = "aarch64")]
 fn arch_init(vm: &mut VM, vcpu: &mut VCPU, mem_region_idx: usize, args: &Args) -> io::Result<()> {
-    let regs_hash = load_regs_hash()?;
-    for (key, val) in regs_hash {
+    for (key, val) in REGS.iter() {
         println!("{:?} {:#x}", key, val);
     }
+    // missing ARM_VCPU_INIT
+    let pc = vcpu.get_one_reg("pc")?;
+    println!("{:#x}", pc.addr);
 
-    let mut regs = vcpu.get_regs()?;
-    println!("HERE");
-    regs.regs.pc = 0x1000;
-    vcpu.set_regs(regs)?;
-    vm.load_file_to_memory(mem_region_idx, &args.binary, regs.regs.pc as usize)?;
-    println!("HERE");
+//    vm.load_file_to_memory(mem_region_idx, &args.binary, regs.regs.pc as usize)?;
+
     Ok(())
 }
 
@@ -519,7 +559,5 @@ fn main() -> io::Result<()> {
         }
     }
 
-    let regs = vcpu.get_regs()?;
-    regs.print();
     Ok(())
 }

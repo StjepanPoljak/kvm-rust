@@ -35,7 +35,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .clang_arg(format!("--target={target}"))
                 .clang_arg("-I/usr/aarch64-linux-gnu/include")
                 .allowlist_type("kvm_userspace_memory_region")
-                .allowlist_type("kvm_regs")
+                .allowlist_type("kvm_one_reg")
+                .allowlist_type("kvm_vcpu_init")
                 .allowlist_type("kvm_run")
                 .generate_comments(false)
                 .generate()?
