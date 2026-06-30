@@ -4,9 +4,10 @@ use std::ptr;
 use clap::Parser;
 use std::fs::File;
 use std::io::{self, Read};
+use std::collections::HashMap;
 
 include!(concat!(env!("OUT_DIR"), "/kvm-bindings.rs"));
-include!(concat!(env!("OUT_DIR"), "/bootparam-bindings.rs"));
+//include!(concat!(env!("OUT_DIR"), "/bootparam-bindings.rs"));
 
 fn le16(b: &[u8], o: usize) -> u16 {
     u16::from_le_bytes([b[o], b[o + 1]])
@@ -43,7 +44,9 @@ const KVM_CREATE_VM : u64 = _IO(KVMIO, 0x01);
 const KVM_CREATE_VCPU : u64 = _IO(KVMIO, 0x41);
 const KVM_GET_VCPU_MMAP_SIZE : u64 = _IO(KVMIO, 0x04);
 const KVM_SET_USER_MEMORY_REGION : u64 = _IOW::<kvm_userspace_memory_region>(KVMIO, 0x46);
+#[cfg(target_arch = "x86_64")]
 const KVM_GET_SREGS2 : u64 = _IOR::<kvm_sregs2>(KVMIO, 0xcc);
+#[cfg(target_arch = "x86_64")]
 const KVM_SET_SREGS2 : u64 = _IOW::<kvm_sregs2>(KVMIO, 0xcd);
 const KVM_GET_REGS : u64 = _IOR::<kvm_regs>(KVMIO, 0x81);
 const KVM_SET_REGS : u64 = _IOW::<kvm_regs>(KVMIO, 0x82);
@@ -54,6 +57,40 @@ const KVM_EXIT_HLT : u32 = 5;
 const KVM_EXIT_MMIO : u32 = 6;
 const KVM_EXIT_SHUTDOWN : u32 = 8;
 const KVM_EXIT_INTERNAL_ERROR : u32 = 17;
+
+const KVM_REG_ARM64 : u64 = 0x6000000000000000;
+const KVM_REG_SIZE_U64 : u64 = 0x0030000000000000;
+const KVM_REG_ARM_COPROC_SHIFT : u64 = 16;
+const KVM_REG_ARM_CORE : u64 = 0x0010 << KVM_REG_ARM_COPROC_SHIFT;
+
+fn AARCH64_CORE_REG(name: &str) -> io::Result<u64> {
+    let base = KVM_REG_ARM64 | KVM_REG_SIZE_U64 | KVM_REG_ARM_CORE;
+    if name.starts_with("x") {
+        let reg : u64 = name[1..]
+            .parse()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        return Ok(base | reg * 2); }
+
+    match name {
+        "sp" => { return Ok(base | (31 * 2)); },
+        "pc" => { return Ok(base | (32 * 2)); },
+        "pstate" => { return Ok(base | (33 * 2)); },
+        _ => ()
+    };
+
+    Err(io::Error::other("Invalid register."))
+}
+
+fn load_regs_hash() -> io::Result<HashMap<String, u64>> {
+    let mut res = HashMap::<String, u64>::new();
+    let mut regs = ((0..30).map(|x| format!("x{x}")).collect::<Vec<String>>());
+    regs.extend(["sp", "pc", "pstate"].iter().map(|x| x.to_string()).collect::<Vec<String>>());
+    for each in regs {
+        let id = AARCH64_CORE_REG(&each)?;
+        res.insert(each, id);
+    }
+    Ok(res)
+}
 
 #[derive(Parser, Debug)]
 #[command(version, about)]
@@ -248,6 +285,7 @@ pub struct VCPU {
 }
 
 impl kvm_regs {
+    #[cfg(target_arch = "x86_64")]
     fn print(&self) {
        println!("RAX={:#x}\tRBX={:#x}\tRCX={:#x}\tRDX={:#x}", self.rax, self.rbx, self.rcx, self.rdx);
        println!("RSI={:#x}\tRDI={:#x}\tRSP={:#x}\tRBP={:#x}", self.rsi, self.rdi, self.rsp, self.rbp);
@@ -255,8 +293,13 @@ impl kvm_regs {
        println!("R12={:#x}\tR13={:#x}\tR14={:#x}\tR15={:#x}", self.r12, self.r13, self.r14, self.r15);
        println!("RIP={:#x}\tRFLAGS={:#x}", self.rip, self.rflags);
     }
+    #[cfg(target_arch = "aarch64")]
+    fn print(&self) {
+        println!("Not implemented.");
+    }
 }
 
+#[cfg(target_arch = "x86_64")]
 impl kvm_segment {
     fn print(&self, name: &str) {
         println!("{name}\tbase={:#x}\tselector={:#x}\tlimit={:#x}\ttype={:#x}\tpresent={:#x}",
@@ -266,12 +309,15 @@ impl kvm_segment {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 impl kvm_dtable {
     fn print(&self, name: &str) {
         println!("{name}\tbase={:#x}\tlimit={:#x}\n", self.base, self.limit);
     }
 }
 
+
+#[cfg(target_arch = "x86_64")]
 impl kvm_sregs2 {
     fn print(&self) {
         self.cs.print("CS");
@@ -318,6 +364,7 @@ impl VCPU {
         Ok(())
     }
 
+    #[cfg(target_arch = "x86_64")]
     fn get_sregs2(&mut self) -> io::Result<kvm_sregs2> {
         let mut sregs2 = unsafe { std::mem::zeroed() };
         // 140904 ioctl(10<anon_inode:kvm-vcpu:0>, 0x8140aecc /* KVM_GET_SREGS2 */, 0x77690198f310) = 0
@@ -331,6 +378,7 @@ impl VCPU {
         Ok(sregs2)
     }
 
+    #[cfg(target_arch = "x86_64")]
     fn set_sregs2(&self, sregs2: kvm_sregs2) -> io::Result<()> {
         let ret = unsafe {
             libc::ioctl(self.fd, KVM_SET_SREGS2, &sregs2)
@@ -373,19 +421,8 @@ impl Drop for VCPU {
     }
 }
 
-fn main() -> io::Result<()> {
-    let args = Args::parse();
-    let kvm_dev = KvmDev::new()?;
-    let mut vm = kvm_dev.create_vm()?;
-    let mem_region_idx = vm.add_mem_region(args.memory * 1024, 0x0)?;
-    let mut vcpu = vm.create_vcpu()?;
-
-    vcpu.set_kvm_run_mem(kvm_dev.get_kvm_run_size())?;
-
-//    vm.load_linux(&args.binary, "console=ttyS0")?;
-
-//    return Ok(());
-
+#[cfg(target_arch = "x86_64")]
+fn arch_init(vm: &mut VM, vcpu: &mut VCPU, mem_region_idx: usize, args: &Args) -> io::Result<()> {
     let mut sregs2 = vcpu.get_sregs2()?;
     sregs2.cs.base = 0;
     sregs2.cs.selector = 0;
@@ -398,7 +435,39 @@ fn main() -> io::Result<()> {
     vcpu.set_regs(regs)?;
 
     vm.load_file_to_memory(mem_region_idx, &args.binary, regs.rip as usize)?;
+    Ok(())
+}
 
+#[cfg(target_arch = "aarch64")]
+fn arch_init(vm: &mut VM, vcpu: &mut VCPU, mem_region_idx: usize, args: &Args) -> io::Result<()> {
+    let regs_hash = load_regs_hash()?;
+    for (key, val) in regs_hash {
+        println!("{:?} {:#x}", key, val);
+    }
+
+    let mut regs = vcpu.get_regs()?;
+    println!("HERE");
+    regs.regs.pc = 0x1000;
+    vcpu.set_regs(regs)?;
+    vm.load_file_to_memory(mem_region_idx, &args.binary, regs.regs.pc as usize)?;
+    println!("HERE");
+    Ok(())
+}
+
+fn main() -> io::Result<()> {
+    let args = Args::parse();
+    let kvm_dev = KvmDev::new()?;
+    let mut vm = kvm_dev.create_vm()?;
+    let mem_region_idx = vm.add_mem_region(args.memory * 1024, 0x0)?;
+    let mut vcpu = vm.create_vcpu()?;
+
+    arch_init(&mut vm, &mut vcpu, mem_region_idx, &args)?;
+
+    vcpu.set_kvm_run_mem(kvm_dev.get_kvm_run_size())?;
+
+//    vm.load_linux(&args.binary, "console=ttyS0")?;
+
+//    return Ok(());
 
     let run = vcpu.kvm_run_mem as *mut kvm_run;
 
@@ -450,7 +519,7 @@ fn main() -> io::Result<()> {
         }
     }
 
-    let mut regs = vcpu.get_regs()?;
+    let regs = vcpu.get_regs()?;
     regs.print();
     Ok(())
 }
