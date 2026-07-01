@@ -55,7 +55,7 @@ const KVM_GET_REGS : u64 = _IOR::<kvm_regs>(KVMIO, 0x81);
 const KVM_SET_REGS : u64 = _IOW::<kvm_regs>(KVMIO, 0x82);
 
 #[cfg(target_arch = "aarch64")]
-const KVM_ARM_VCPU_INIT : u64 = _IOW::<kvm_one_reg>(KVMIO, 0xae);
+const KVM_ARM_VCPU_INIT : u64 = _IOW::<kvm_vcpu_init>(KVMIO, 0xae);
 #[cfg(target_arch = "aarch64")]
 const KVM_GET_ONE_REG : u64 = _IOW::<kvm_one_reg>(KVMIO, 0xab);
 #[cfg(target_arch = "aarch64")]
@@ -447,8 +447,13 @@ impl VCPU {
     }
 
     #[cfg(target_arch = "aarch64")]
-    fn vcpu_arm_init(&self) -> io::Result<()> {
+    fn arm_vcpu_init(&self) -> io::Result<()> {
         let mut vcpu_init : kvm_vcpu_init = unsafe { std::mem::zeroed() };
+        // KVM_ARM_VCPU_INIT: target=5 features=(0, 0, 0, 0, 0, 0, 0)
+        // KVM_ARM_VCPU_INIT: target=5 features=(12, 0, 0, 0, 0, 0, 0)
+        // KVM_ARM_VCPU_INIT: target=5 features=(12, 0, 0, 0, 0, 0, 0)
+        // KVM_ARM_VCPU_INIT: target=5 features=(12, 0, 0, 0, 0, 0, 0)
+        vcpu_init.target = 5;
         let ret = unsafe { libc::ioctl(self.fd, KVM_ARM_VCPU_INIT, &mut vcpu_init) };
         if ret < 0 {
             return Err(io::Error::last_os_error());
@@ -485,7 +490,7 @@ fn arch_init(vm: &mut VM, vcpu: &mut VCPU, mem_region_idx: usize, args: &Args) -
     for (key, val) in REGS.iter() {
         println!("{:?} {:#x}", key, val);
     }
-    // missing ARM_VCPU_INIT
+    vcpu.arm_vcpu_init()?;
     let pc = vcpu.get_one_reg("pc")?;
     println!("{:#x}", pc.addr);
 
