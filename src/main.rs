@@ -118,6 +118,10 @@ struct Args {
     /// Memory size in kilobytes
     #[arg(short, long, default_value_t = 256)]
     memory: usize,
+
+    /// Load address
+    #[arg(short, long, default_value_t = 0x40000)]
+    load_addr: u64
 }
 
 pub struct KvmDev {
@@ -429,7 +433,7 @@ impl VCPU {
     }
 
     #[cfg(target_arch = "aarch64")]
-    fn get_one_reg(&mut self, name: &str) -> io::Result<kvm_one_reg> {
+    fn get_one_reg(&mut self, name: &str) -> io::Result<u64> {
         let mut val : u64 = 0;
         let mut reg : kvm_one_reg = unsafe { std::mem::zeroed() };
 
@@ -443,7 +447,23 @@ impl VCPU {
             return Err(io::Error::last_os_error());
         }
 
-        Ok(reg)
+        Ok(val)
+    }
+    #[cfg(target_arch = "aarch64")]
+    fn set_one_reg(&mut self, name: &str, val: u64) -> io::Result<()> {
+        let mut reg : kvm_one_reg = unsafe { std::mem::zeroed() };
+
+        reg.id = *REGS.get(name).ok_or(io::Error::other("Invalid register name."))?;
+        reg.addr = &val as *const u64 as u64;
+
+        let ret = unsafe {
+            libc::ioctl(self.fd, KVM_SET_ONE_REG, &mut reg)
+        };
+        if ret < 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        Ok(())
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -482,24 +502,36 @@ fn arch_init(vm: &mut VM, vcpu: &mut VCPU, mem_region_idx: usize, args: &Args) -
     vcpu.set_regs(regs)?;
 
     vm.load_file_to_memory(mem_region_idx, &args.binary, regs.rip as usize)?;
+
     Ok(())
 }
 
 #[cfg(target_arch = "aarch64")]
 fn arch_init(vm: &mut VM, vcpu: &mut VCPU, mem_region_idx: usize, args: &Args) -> io::Result<()> {
-    for (key, val) in REGS.iter() {
-        println!("{:?} {:#x}", key, val);
-    }
     vcpu.arm_vcpu_init()?;
+    vcpu.set_one_reg("pc", args.load_addr)?;
     let pc = vcpu.get_one_reg("pc")?;
-    println!("{:#x}", pc.addr);
+    println!("pc = {:#x}", pc);
+    
+    let pstate : u64 = vcpu.get_one_reg("pstate")?;
+    println!("pstate = {:#x}", pstate);
 
-//    vm.load_file_to_memory(mem_region_idx, &args.binary, regs.regs.pc as usize)?;
+    vm.load_file_to_memory(mem_region_idx, &args.binary, pc as usize)?;
 
     Ok(())
 }
+extern "C" fn handler(_sig: libc::c_int) { }
+
+unsafe fn install_interrupt_signal() {
+    let mut sa: libc::sigaction = std::mem::zeroed();
+    sa.sa_sigaction = handler as *const() as usize;
+    libc::sigemptyset(&mut sa.sa_mask);
+    sa.sa_flags = 0;
+    libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
+}
 
 fn main() -> io::Result<()> {
+    unsafe { install_interrupt_signal() };
     let args = Args::parse();
     let kvm_dev = KvmDev::new()?;
     let mut vm = kvm_dev.create_vm()?;
@@ -510,16 +542,17 @@ fn main() -> io::Result<()> {
 
     vcpu.set_kvm_run_mem(kvm_dev.get_kvm_run_size())?;
 
-//    vm.load_linux(&args.binary, "console=ttyS0")?;
-
-//    return Ok(());
-
     let run = vcpu.kvm_run_mem as *mut kvm_run;
-
 
     loop {
         let ret = unsafe { libc::ioctl(vcpu.fd, KVM_RUN, 0usize) };
         if ret < 0 {
+            if io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                let x0 = vcpu.get_one_reg("x0")?;
+                println!("x0 = {:#x}", x0);
+                let pc = vcpu.get_one_reg("pc")?;
+                println!("pc = {:#x}", pc);
+            }
             return Err(io::Error::last_os_error());
         }
 
