@@ -4,48 +4,18 @@ use std::ptr;
 use clap::Parser;
 use std::fs::File;
 use std::io::{self, Read};
-
-use libc::{
-    _IOW, _IO, _IOR
-};
+use libc::{_IOW, _IO, _IOR};
 
 include!(concat!(env!("OUT_DIR"), "/kvm-bindings.rs"));
 
-pub const KVMIO : u32 = 0xae;
-
 include!("arch/mod.rs");
 
-fn le16(b: &[u8], o: usize) -> u16 {
-    u16::from_le_bytes([b[o], b[o + 1]])
-}
-
-fn le32(b: &[u8], o: usize) -> u32 {
-    u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
-}
-
-fn wle16(b: &mut [u8], o: usize, val: u16) -> () {
-    b[o..(o + 2)].copy_from_slice(&val.to_le_bytes());
-}
-
-fn wle32(b: &mut [u8], o: usize, val: u32) -> () {
-    b[o..(o + 4)].copy_from_slice(&val.to_le_bytes());
-}
-
-fn read_string(b: &[u8], o: usize) -> io::Result<String> {
-    let end = b[o..]
-        .iter()
-        .position(|&c| c == 0).ok_or(io::Error::other("Could not extract string."))?;
-    let res = std::str::from_utf8(&b[o..(o + end)])
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
-        .to_string();
-    Ok(res)
-}
+pub const KVMIO : u32 = 0xae;
 
 const KVM_CREATE_VM : u64 = _IO(KVMIO, 0x01);
 const KVM_CREATE_VCPU : u64 = _IO(KVMIO, 0x41);
 const KVM_GET_VCPU_MMAP_SIZE : u64 = _IO(KVMIO, 0x04);
 const KVM_SET_USER_MEMORY_REGION : u64 = _IOW::<kvm_userspace_memory_region>(KVMIO, 0x46);
-
 const KVM_RUN : u64 = _IO(KVMIO, 0x80);
 
 const KVM_EXIT_IO : u32 = 2;
@@ -65,8 +35,8 @@ struct Args {
     memory: usize,
 
     /// Load address
-    #[arg(short, long, default_value_t = 0x40000)]
-    load_addr: u64
+    #[arg(short, long, default_value_t = 0x1000)]
+    load_addr: usize
 }
 
 pub struct KvmDev {
@@ -186,56 +156,9 @@ impl VM {
         let mut res = Vec::new();
         file.read_to_end(&mut res)?;
 
+        println!("Loading {:?} to {:#X}...", path, addr);
+
         self.load_data_to_memory(mem_region_idx, res, addr)
-    }
-
-    fn load_linux(&self, path: &str, cmdline: &str) -> io::Result<()> {
-        let mut file = File::open(path)?;
-        let mut res = Vec::new();
-        file.read_to_end(&mut res)?;
-
-        if &res[0x202..(0x202+4)] != "HdrS".as_bytes().to_vec() {
-            return Err(io::Error::other("Unknown Linux kernel image."));
-        }
-
-        println!("Detected Linux kernel image.");
-
-        let prot = le16(&res, 0x206);
-        if prot < 0x202 {
-            return Err(io::Error::other(format!("Unsupported protocol version: {:#x}.", prot)));
-        }
-
-        let real_addr    = 0x10000;
-        let cmdline_addr = 0x20000;
-        let prot_addr    = 0x100000;
-
-        println!("Boot protocol version: {:#x}.", prot);
-
-        let kern_v_str = read_string(&res, (le16(&res, 0x20e) + 0x200) as usize)?;
-
-        println!("Linux kernel {}", kern_v_str);
-
-        if prot >= 0x202 {
-            wle32(&mut res, 0x228, cmdline_addr);
-        }
-
-        if prot >= 0x200 {
-            res[0x210] = 0xB0;
-        }
-
-        /* heap */
-        if prot >= 0x201 {
-            res[0x211] |= 0x80;
-            wle16(&mut res, 0x224, (cmdline_addr - real_addr - 0x200).try_into().unwrap());
-        }
-
-        let mut setup_size = res[0x1f1] as usize;
-        if setup_size == 0 {
-            setup_size = 4;
-        }
-        setup_size = (setup_size + 1) * 512;
-
-        Ok(())
     }
 }
 
@@ -249,7 +172,6 @@ pub struct VCPU {
     pub fd: libc::c_int,
     pub kvm_run_mem: *mut libc::c_void
 }
-
 
 impl VCPU {
     fn set_kvm_run_mem(&mut self, kvm_run_size: usize) -> io::Result<()> {
@@ -267,8 +189,6 @@ impl VCPU {
         }
         Ok(())
     }
-
-
 }
 
 impl Drop for VCPU {
@@ -276,7 +196,6 @@ impl Drop for VCPU {
         unsafe { libc::close(self.fd); }
     }
 }
-
 
 extern "C" fn handler(_sig: libc::c_int) { }
 
@@ -289,16 +208,20 @@ unsafe fn install_interrupt_signal() {
 }
 
 fn main() -> io::Result<()> {
-    unsafe { install_interrupt_signal() };
     let args = Args::parse();
     let kvm_dev = KvmDev::new()?;
     let mut vm = kvm_dev.create_vm()?;
     let mem_region_idx = vm.add_mem_region(args.memory * 1024, 0x0)?;
     let mut vcpu = vm.create_vcpu()?;
 
-    arch::arch_init(&mut vm, &mut vcpu, mem_region_idx, &args)?;
+    arch::arch_init(&mut vm, &mut vcpu)?;
+    vcpu.set_ip(args.load_addr)?;
+    vcpu.print_regs()?;
 
+    vm.load_file_to_memory(mem_region_idx, &args.binary, args.load_addr)?;
     vcpu.set_kvm_run_mem(kvm_dev.get_kvm_run_size())?;
+
+    unsafe { install_interrupt_signal() };
 
     let run = vcpu.kvm_run_mem as *mut kvm_run;
 
@@ -306,7 +229,7 @@ fn main() -> io::Result<()> {
         let ret = unsafe { libc::ioctl(vcpu.fd, KVM_RUN, 0usize) };
         if ret < 0 {
             if io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
-		vcpu.print_regs();
+                vcpu.print_regs()?;
             }
             return Err(io::Error::last_os_error());
         }
@@ -320,10 +243,7 @@ fn main() -> io::Result<()> {
                 let direction = io.direction;
                 let size = io.size;
                 let data_offset = io.data_offset;
-
                 if direction == 0 {
-                    println!("IO EXIT: port=0x{:x}, dir={}, size={}",
-                             port, direction, size);
                     let base = vcpu.kvm_run_mem as *const u8;
                     let data_ptr = unsafe { base.add(io.data_offset as usize) };
                     let value = unsafe { *(data_ptr as *const u16) };

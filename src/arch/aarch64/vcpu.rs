@@ -99,6 +99,15 @@ impl VCPU {
         Ok(())
     }
 
+    pub fn set_ip(&mut self, ip: usize) -> io::Result<()> {
+        self.set_one_reg("pc", ip as u64)
+    }
+
+    pub fn get_ip(&mut self) -> io::Result<usize> {
+        let pc = self.get_one_reg("x0")?;
+        Ok(pc as usize)
+    }
+
     pub fn print_regs(&mut self) -> io::Result<()> {
         let x0 = self.get_one_reg("x0")?;
         println!("x0 = {:#x}", x0);

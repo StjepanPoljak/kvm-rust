@@ -3,8 +3,8 @@ include!(concat!(env!("OUT_DIR"), "/kvm-bindings.rs"));
 use std::io::{self, Read};
 use libc::{_IOW, _IO, _IOR};
 
-use crate::VCPU;
 use crate::KVMIO;
+use crate::VCPU;
 
 const KVM_GET_SREGS2 : u64 = _IOR::<kvm_sregs2>(KVMIO, 0xcc);
 const KVM_SET_SREGS2 : u64 = _IOW::<kvm_sregs2>(KVMIO, 0xcd);
@@ -113,6 +113,17 @@ impl VCPU {
         }
 
         Ok(())
+    }
+
+    pub fn set_ip(&mut self, ip: usize) -> io::Result<()> {
+        let mut regs = self.get_regs()?;
+        regs.rip = ip as u64;
+        self.set_regs(regs)
+    }
+
+    pub fn get_ip(&mut self) -> io::Result<usize> {
+        let rip = self.get_regs()?.rip;
+        Ok(rip as usize)
     }
 
     pub fn print_regs(&mut self) -> io::Result<()> {
