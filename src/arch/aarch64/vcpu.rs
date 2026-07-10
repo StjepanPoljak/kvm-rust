@@ -8,7 +8,6 @@ use libc::{_IOW, _IO, _IOR};
 use crate::KVMIO;
 use crate::VCPU;
 
-const KVM_ARM_VCPU_INIT : u64 = _IOW::<kvm_vcpu_init>(KVMIO, 0xae);
 const KVM_GET_ONE_REG : u64 = _IOW::<kvm_one_reg>(KVMIO, 0xab);
 const KVM_SET_ONE_REG : u64 = _IOW::<kvm_one_reg>(KVMIO, 0xac);
 
@@ -85,20 +84,6 @@ impl VCPU {
         Ok(())
     }
 
-    pub fn arm_vcpu_init(&self) -> io::Result<()> {
-        let mut vcpu_init : kvm_vcpu_init = unsafe { std::mem::zeroed() };
-        // KVM_ARM_VCPU_INIT: target=5 features=(0, 0, 0, 0, 0, 0, 0)
-        // KVM_ARM_VCPU_INIT: target=5 features=(12, 0, 0, 0, 0, 0, 0)
-        // KVM_ARM_VCPU_INIT: target=5 features=(12, 0, 0, 0, 0, 0, 0)
-        // KVM_ARM_VCPU_INIT: target=5 features=(12, 0, 0, 0, 0, 0, 0)
-        vcpu_init.target = 5;
-        let ret = unsafe { libc::ioctl(self.fd, KVM_ARM_VCPU_INIT, &mut vcpu_init) };
-        if ret < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
-    }
-
     pub fn set_ip(&mut self, ip: usize) -> io::Result<()> {
         self.set_one_reg("pc", ip as u64)
     }
@@ -109,11 +94,15 @@ impl VCPU {
     }
 
     pub fn print_regs(&mut self) -> io::Result<()> {
-        let x0 = self.get_one_reg("x0")?;
-        println!("x0 = {:#x}", x0);
-        let pc = self.get_one_reg("pc")?;
-        println!("pc = {:#x}", pc);
-
+        let mut col = 1;
+        print!("{:>8} {:>20}", "reg", "id");
+        println!("{:>8} {:>20}", "reg", "id");
+        for (key, val) in REGS.iter() {
+            print!("{:>8} {:>#20x}", key, val);
+            if col == 1 { col = 2; }
+            else if col == 2 { println!(); col = 1; }
+        }
+        println!();
         Ok(())
     }
 }

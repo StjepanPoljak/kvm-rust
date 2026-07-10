@@ -215,8 +215,8 @@ fn main() -> io::Result<()> {
     let mut vcpu = vm.create_vcpu()?;
 
     arch::arch_init(&mut vm, &mut vcpu)?;
-    vcpu.set_ip(args.load_addr)?;
     vcpu.print_regs()?;
+    vcpu.set_ip(args.load_addr)?;
 
     vm.load_file_to_memory(mem_region_idx, &args.binary, args.load_addr)?;
     vcpu.set_kvm_run_mem(kvm_dev.get_kvm_run_size())?;
