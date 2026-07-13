@@ -6,6 +6,8 @@ use std::fs::File;
 use std::io::{self, Read};
 use libc::{_IOW, _IO, _IOR};
 
+use std::collections::HashMap;
+
 include!(concat!(env!("OUT_DIR"), "/kvm-bindings.rs"));
 
 include!("arch/mod.rs");
@@ -36,7 +38,11 @@ struct Args {
 
     /// Load address
     #[arg(short, long, default_value_t = 0x1000)]
-    load_addr: usize
+    load_addr: u64,
+
+    /// Device tree blob
+    #[arg(short, long)]
+    dtb:Option<String>
 }
 
 pub struct KvmDev {
@@ -97,6 +103,36 @@ impl Drop for MemRegion {
     }
 }
 
+fn read_le16(b: &[u8], o: usize) -> u16 {
+    u16::from_le_bytes([b[o], b[o + 1]])
+}
+
+fn read_le32(b: &[u8], o: usize) -> u32 {
+    u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
+}
+
+fn read_le64(b: &[u8], o: usize) -> u64 {
+    u64::from_le_bytes(b[o..(o + 8)].try_into().unwrap())
+}
+
+fn write_le16(b: &mut [u8], o: usize, val: u16) -> () {
+    b[o..(o + 2)].copy_from_slice(&val.to_le_bytes());
+}
+
+fn write_le32(b: &mut [u8], o: usize, val: u32) -> () {
+    b[o..(o + 4)].copy_from_slice(&val.to_le_bytes());
+}
+
+fn read_string(b: &[u8], o: usize) -> io::Result<String> {
+    let end = b[o..]
+        .iter()
+        .position(|&c| c == 0).ok_or(io::Error::other("Could not extract string."))?;
+    let res = std::str::from_utf8(&b[o..(o + end)])
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+        .to_string();
+    Ok(res)
+}
+
 impl VM {
     fn create_vcpu(&self) -> io::Result<VCPU> {
         // 140904 ioctl(9<anon_inode:kvm-vm>, 0xae41 /* KVM_CREATE_VCPU */, 0) = 10<anon_inode:kvm-vcpu:0>
@@ -142,16 +178,16 @@ impl VM {
         Ok(self.mem_regions.len() - 1)
     }
 
-    fn load_data_to_memory(&self, mem_region_idx: usize, data: Vec<u8>, addr: usize) -> io::Result<()> {
+    fn load_data_to_memory(&self, mem_region_idx: usize, data: Vec<u8>, addr: u64) -> io::Result<()> {
         let mem_ptr = self.mem_regions.get(mem_region_idx).ok_or(io::Error::other("Data exceeds memory region."))?.mem_ptr;
         unsafe {
-            std::ptr::copy_nonoverlapping(data.as_ptr(), (mem_ptr as *mut u8).add(addr), data.len());
+            std::ptr::copy_nonoverlapping(data.as_ptr(), (mem_ptr as *mut u8).add(addr as usize), data.len());
         };
 
         Ok(())
     }
 
-    fn load_file_to_memory(&self, mem_region_idx: usize, path: &str, addr: usize) -> io::Result<()> {
+    fn load_file_to_memory(&self, mem_region_idx: usize, path: &str, addr: u64) -> io::Result<()> {
         let mut file = File::open(path)?;
         let mut res = Vec::new();
         file.read_to_end(&mut res)?;
@@ -159,6 +195,10 @@ impl VM {
         println!("Loading {:?} to {:#X}...", path, addr);
 
         self.load_data_to_memory(mem_region_idx, res, addr)
+    }
+
+    fn load_linux(&mut self, vcpu: &mut VCPU, args: &Args) -> io::Result<()> {
+        self.arch_load_linux(vcpu, args)
     }
 }
 
@@ -197,7 +237,12 @@ impl Drop for VCPU {
     }
 }
 
-extern "C" fn handler(_sig: libc::c_int) { }
+use std::sync::atomic::{AtomicBool, Ordering};
+static SHOULD_STOP: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn handler(_sig: libc::c_int) {
+    SHOULD_STOP.store(true, Ordering::SeqCst);
+}
 
 unsafe fn install_interrupt_signal() {
     let mut sa: libc::sigaction = std::mem::zeroed();
@@ -205,20 +250,60 @@ unsafe fn install_interrupt_signal() {
     libc::sigemptyset(&mut sa.sa_mask);
     sa.sa_flags = 0;
     libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
+
+}
+
+pub struct UARTState {
+    cr:   u32,   // 0x30
+    imsc: u32,   // 0x38
+    lcr:  u32,   // 0x2c
+    ibrd: u32,   // 0x24
+    fbrd: u32    // 0x28
+}
+
+impl UARTState {
+    fn new() -> Self {
+        UARTState {
+            cr: 0x0, imsc: 0x0, lcr: 0x0, ibrd: 0x0, fbrd: 0x0
+        }
+    }
+
+    fn pl011_response(&mut self, inb: u32) -> io::Result<u32> {
+        let pl011_map : HashMap<u32, u32> = HashMap::from([
+            (0xfe0, 0x11), (0xfe4, 0x10), (0xfe8, 0x14), (0xfec, 0x00), // PeriphID0-3
+            (0xff0, 0x0d), (0xff4, 0xf0), (0xff8, 0x05), (0xffc, 0xb1), // PCellID0-3
+            (0x018, 0x90)
+        ]);
+
+        if let Some(ret) = pl011_map.get(&inb) {
+            return Ok(*ret);
+        }
+
+        if inb == 0x30 {
+            return Ok(self.cr);
+        }
+
+        Ok(0x0)
+    }
 }
 
 fn main() -> io::Result<()> {
     let args = Args::parse();
     let kvm_dev = KvmDev::new()?;
     let mut vm = kvm_dev.create_vm()?;
-    let mem_region_idx = vm.add_mem_region(args.memory * 1024, 0x0)?;
+    let mut uart = UARTState::new();
     let mut vcpu = vm.create_vcpu()?;
 
     arch::arch_init(&mut vm, &mut vcpu)?;
-    vcpu.set_ip(args.load_addr)?;
+    vcpu.set_ip(args.load_addr as usize)?;
     vcpu.print_regs()?;
 
-    vm.load_file_to_memory(mem_region_idx, &args.binary, args.load_addr)?;
+//    let mem_region_idx = vm.add_mem_region(args.memory * 1024, 0x40000000)?;
+
+    vm.load_linux(&mut vcpu, &args)?;
+
+//    vm.load_file_to_memory(mem_region_idx, &args.binary, args.load_addr)?;
+
     vcpu.set_kvm_run_mem(kvm_dev.get_kvm_run_size())?;
 
     unsafe { install_interrupt_signal() };
@@ -229,8 +314,10 @@ fn main() -> io::Result<()> {
         let ret = unsafe { libc::ioctl(vcpu.fd, KVM_RUN, 0usize) };
         if ret < 0 {
             if io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
-                vcpu.print_regs()?;
+                if SHOULD_STOP.load(Ordering::Relaxed) { break; }
+                continue;
             }
+            vcpu.print_regs()?;
             return Err(io::Error::last_os_error());
         }
 
@@ -253,14 +340,25 @@ fn main() -> io::Result<()> {
                 println!("Guest shutdown.");
                 break; }
             KVM_EXIT_MMIO => {
-                let mmio = unsafe { (*run).__bindgen_anon_1.mmio };
+                let mmio = unsafe { &mut (*run).__bindgen_anon_1.mmio };
                 let phys_addr = mmio.phys_addr;
                 let data = mmio.data;
                 let len = mmio.len;
-                let is_write = mmio.is_write;
-                for i in 0..len {
-                    print!("{}", data[i as usize] as char);
-                } }
+                let is_write = mmio.is_write != 0;
+                if phys_addr >= 0x9_000_000 && phys_addr <= 0x9_010_000 {
+                    if is_write {
+                        if phys_addr == 0x9_000_000 {
+                            for i in 0..len {
+                                print!("{}", data[i as usize] as char);
+                            }
+                            continue;
+                        }
+                    } else {
+                        let resp = Vec::<u8>::new();
+                        write_le32(&mut mmio.data, 0, uart.pl011_response((phys_addr & 0xfff) as u32)?);
+                    }
+                }
+            }
             KVM_EXIT_HLT => {
                 println!("Guest halted.");
                 break; }

@@ -37,7 +37,7 @@ fn AARCH64_CORE_REG(name: &str) -> io::Result<u64> {
 
 fn load_regs_hash() -> io::Result<HashMap<String, u64>> {
     let mut res = HashMap::<String, u64>::new();
-    let mut regs = ((0..30).map(|x| format!("x{x}")).collect::<Vec<String>>());
+    let mut regs = (0..30).map(|x| format!("x{x}")).collect::<Vec<String>>();
     regs.extend(["sp", "pc", "pstate"].iter().map(|x| x.to_string()).collect::<Vec<String>>());
     for each in regs {
         let id = AARCH64_CORE_REG(&each)?;
