@@ -4,11 +4,11 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt update -y                       \
     && apt install -y                   \
-           curl                         \
-           build-essential              \
-           libclang-dev                 \
+           curl build-essential bison   \
+           libclang-dev python3 bc flex \
            linux-libc-dev-arm64-cross   \
            gcc-aarch64-linux-gnu        \
+           libssl-dev                   \
     && rm -rf /var/lib/apt/lists/*
 
 ARG USER=docker

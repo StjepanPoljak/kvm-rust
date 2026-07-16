@@ -56,7 +56,7 @@ impl VM {
 
         match &args.dtb {
             Some(dtb_path) => { self.load_file_to_memory(linux_mem_idx, &dtb_path, 0x0)?; },
-            Nothing => { return Err(io::Error::other("Could not find device tree blob.")); }
+            None => { return Err(io::Error::other("Could not find device tree blob.")); }
         }
 
         self.load_file_to_memory(linux_mem_idx, &args.binary, KERN_OFFS)?;

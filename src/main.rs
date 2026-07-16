@@ -346,13 +346,9 @@ fn main() -> io::Result<()> {
                 let len = mmio.len;
                 let is_write = mmio.is_write != 0;
                 if phys_addr >= 0x9_000_000 && phys_addr <= 0x9_010_000 {
-                    if is_write {
-                        if phys_addr == 0x9_000_000 {
-                            for i in 0..len {
-                                print!("{}", data[i as usize] as char);
-                            }
-                            continue;
-                        }
+                    if is_write && phys_addr == 0x9_000_000 {
+                        /* we take only first u8 element of data */
+                        print!("{}", mmio.data[0] as char);
                     } else {
                         let resp = Vec::<u8>::new();
                         write_le32(&mut mmio.data, 0, uart.pl011_response((phys_addr & 0xfff) as u32)?);
