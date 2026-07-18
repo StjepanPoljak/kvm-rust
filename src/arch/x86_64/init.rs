@@ -12,3 +12,9 @@ pub fn arch_init(vm: &mut VM, vcpu: &mut VCPU) -> io::Result<()> {
 
     vcpu.set_sregs2(sregs2)
 }
+
+impl VM {
+    pub fn arch_load_linux(&mut self, vcpu: &mut VCPU, args: &Args) -> io::Result<()> {
+	Err(io::Error::other("Loading Linux not implemented for x86."))
+    }
+}

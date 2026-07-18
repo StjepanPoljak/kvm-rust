@@ -17,7 +17,7 @@ const KVM_REG_SIZE_U64 : u64 = 0x0030000000000000;
 const KVM_REG_ARM_COPROC_SHIFT : u64 = 16;
 const KVM_REG_ARM_CORE : u64 = 0x0010 << KVM_REG_ARM_COPROC_SHIFT;
 
-fn AARCH64_CORE_REG(name: &str) -> io::Result<u64> {
+fn aarch64_core_reg(name: &str) -> io::Result<u64> {
     let base = KVM_REG_ARM64 | KVM_REG_SIZE_U64 | KVM_REG_ARM_CORE;
     if name.starts_with("x") {
         let reg : u64 = name[1..]
@@ -40,7 +40,7 @@ fn load_regs_hash() -> io::Result<HashMap<String, u64>> {
     let mut regs = (0..30).map(|x| format!("x{x}")).collect::<Vec<String>>();
     regs.extend(["sp", "pc", "pstate"].iter().map(|x| x.to_string()).collect::<Vec<String>>());
     for each in regs {
-        let id = AARCH64_CORE_REG(&each)?;
+        let id = aarch64_core_reg(&each)?;
         res.insert(each, id);
     }
     Ok(res)
