@@ -38,6 +38,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .allowlist_type("kvm_one_reg")
                 .allowlist_type("kvm_vcpu_init")
                 .allowlist_type("kvm_run")
+                .allowlist_type("kvm_create_device")
+                .allowlist_type("kvm_device_attr")
+                .allowlist_type("kvm_irq_level")
                 .generate_comments(false)
                 .generate()?
                 .write_to_file(out_path.join("kvm-bindings.rs"))?;

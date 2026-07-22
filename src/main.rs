@@ -6,12 +6,18 @@ use std::fs::File;
 use std::io::{self, Read};
 use libc::{_IOW, _IO, _IOR};
 use std::collections::HashMap;
+use std::sync::{Arc,Mutex};
+use std::sync::atomic::{AtomicBool, Ordering, AtomicU64};
 
 type MMIO = kvm_run__bindgen_ty_1__bindgen_ty_6;
+type MMIODevices = HashMap::<u64, Arc<Mutex<dyn MMIODevice>>>;
 
 trait MMIODevice {
-    fn handle(&mut self, mmio: &mut MMIO) -> io::Result<()>;
+    fn handle(&mut self, vm_fd: libc::c_int, mmio: &mut MMIO) -> io::Result<()>;
 }
+
+static SHOULD_STOP: AtomicBool = AtomicBool::new(false);
+static MAIN_TID: AtomicU64 = AtomicU64::new(0);
 
 include!(concat!(env!("OUT_DIR"), "/kvm-bindings.rs"));
 
@@ -48,7 +54,11 @@ struct Args {
 
     /// Device tree blob
     #[arg(short, long)]
-    dtb:Option<String>
+    dtb:Option<String>,
+
+    /// Initramfs path
+    #[arg(short, long)]
+    initramfs:Option<String>
 }
 
 pub struct KvmDev {
@@ -80,7 +90,7 @@ impl KvmDev {
             return Err(io::Error::last_os_error());
         }
 
-        Ok(VM { fd: vm_fd, mem_regions: Vec::<MemRegion>::new(), mmio_devices: HashMap::<u64, Box<dyn MMIODevice>>::new() })
+        Ok(VM { fd: vm_fd, mem_regions: Vec::<MemRegion>::new(), mmio_devices: MMIODevices::new() })
     }
 
     fn fd(&self) -> libc::c_int {
@@ -95,7 +105,7 @@ impl KvmDev {
 pub struct VM {
     pub fd: libc::c_int,
     pub mem_regions: Vec<MemRegion>,
-    pub mmio_devices: HashMap<u64, Box<dyn MMIODevice>>
+    pub mmio_devices: MMIODevices
 }
 
 pub struct MemRegion {
@@ -180,6 +190,8 @@ impl VM {
         let mut res = Vec::new();
         file.read_to_end(&mut res)?;
 
+        println!("Loading {:?} at {:#x}...", path, offset + self.mem_regions[mem_region_idx].guest_phys_addr);
+
         self.load_data_to_memory(mem_region_idx, res, offset)
     }
 
@@ -231,9 +243,6 @@ impl Drop for VCPU {
     }
 }
 
-use std::sync::atomic::{AtomicBool, Ordering};
-static SHOULD_STOP: AtomicBool = AtomicBool::new(false);
-
 extern "C" fn handler(_sig: libc::c_int) {
     SHOULD_STOP.store(true, Ordering::SeqCst);
 }
@@ -244,9 +253,7 @@ unsafe fn install_interrupt_signal() {
     libc::sigemptyset(&mut sa.sa_mask);
     sa.sa_flags = 0;
     libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
-
 }
-
 
 fn main() -> io::Result<()> {
     let args = Args::parse();
@@ -268,6 +275,7 @@ fn main() -> io::Result<()> {
 
     vcpu.set_kvm_run_mem(kvm_dev.get_kvm_run_size())?;
 
+    MAIN_TID.store(unsafe { libc::pthread_self() } as u64, Ordering::SeqCst);
     unsafe { install_interrupt_signal() };
 
     let run = vcpu.kvm_run_mem as *mut kvm_run;
