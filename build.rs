@@ -14,6 +14,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .allowlist_type("kvm_userspace_memory_region")
                 .allowlist_type("kvm_regs")
                 .allowlist_type("kvm_run")
+                .allowlist_type("kvm_cpuid2")
+                .allowlist_type("kvm_cpuid_entry2")
+                .allowlist_type("kvm_pit_config")
                 .generate_comments(false)
                 .generate()?
                 .write_to_file(out_path.join("kvm-bindings.rs"))?;

@@ -1,8 +1,7 @@
-include!(concat!(env!("OUT_DIR"), "/kvm-bindings.rs"));
+use std::io::{ self, Read };
+use libc::{ _IOW, _IO, _IOR };
 
-use std::io::{self, Read};
-use libc::{_IOW, _IO, _IOR};
-
+use crate::{kvm_regs, kvm_sregs2, kvm_dtable, kvm_segment};
 use crate::KVMIO;
 use crate::VCPU;
 

@@ -1,9 +1,8 @@
-include!(concat!(env!("OUT_DIR"), "/kvm-bindings.rs"));
-
 use std::io::{self, Read};
 use std::collections::HashMap;
 use std::sync::LazyLock;
-use libc::{_IOW, _IO, _IOR};
+use crate::{ kvm_vcpu_init, kvm_one_reg };
+use libc::{ _IOW, _IO, _IOR, _IOWR };
 
 use crate::KVMIO;
 use crate::VCPU;
@@ -96,6 +95,7 @@ impl VCPU {
         if ret < 0 {
             return Err(io::Error::last_os_error());
         }
+
         Ok(())
     }
 
@@ -110,9 +110,9 @@ impl VCPU {
 
     pub fn print_regs(&mut self) -> io::Result<()> {
         let x0 = self.get_one_reg("x0")?;
-        println!("x0 = {:#x}", x0);
+        println!("x0 = {:#x}\r", x0);
         let pc = self.get_one_reg("pc")?;
-        println!("pc = {:#x}", pc);
+        println!("pc = {:#x}\r", pc);
 
         Ok(())
     }

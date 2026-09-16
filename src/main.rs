@@ -8,10 +8,12 @@ use libc::{_IOW, _IO, _IOR};
 use std::collections::HashMap;
 use std::sync::{Arc,Mutex};
 use std::sync::atomic::{AtomicBool, Ordering, AtomicU64};
+use std::io::Write;
 
 type MMIO = kvm_run__bindgen_ty_1__bindgen_ty_6;
 type MMIODevices = HashMap::<u64, Arc<Mutex<dyn MMIODevice>>>;
-
+const KVM_EXIT_IO_OUT: u8 = 1;
+const KVM_EXIT_IO_IN: u8 = 0;
 trait MMIODevice {
     fn handle(&mut self, vm_fd: libc::c_int, mmio: &mut MMIO) -> io::Result<()>;
 }
@@ -24,19 +26,27 @@ include!(concat!(env!("OUT_DIR"), "/kvm-bindings.rs"));
 include!("util.rs");
 include!("arch/mod.rs");
 
-pub const KVMIO : u32 = 0xae;
+pub const KVMIO: u32 = 0xae;
 
-const KVM_CREATE_VM : u64 = _IO(KVMIO, 0x01);
-const KVM_CREATE_VCPU : u64 = _IO(KVMIO, 0x41);
-const KVM_GET_VCPU_MMAP_SIZE : u64 = _IO(KVMIO, 0x04);
-const KVM_SET_USER_MEMORY_REGION : u64 = _IOW::<kvm_userspace_memory_region>(KVMIO, 0x46);
-const KVM_RUN : u64 = _IO(KVMIO, 0x80);
+const KVM_CREATE_VM: u64 = _IO(KVMIO, 0x01);
+const KVM_CREATE_VCPU: u64 = _IO(KVMIO, 0x41);
+const KVM_GET_VCPU_MMAP_SIZE: u64 = _IO(KVMIO, 0x04);
 
-const KVM_EXIT_IO : u32 = 2;
-const KVM_EXIT_HLT : u32 = 5;
-const KVM_EXIT_MMIO : u32 = 6;
-const KVM_EXIT_SHUTDOWN : u32 = 8;
-const KVM_EXIT_INTERNAL_ERROR : u32 = 17;
+const KVM_SET_USER_MEMORY_REGION: u64 = _IOW::<kvm_userspace_memory_region>(KVMIO, 0x46);
+const KVM_RUN: u64 = _IO(KVMIO, 0x80);
+
+const KVM_EXIT_IO: u32 = 2;
+const KVM_EXIT_HLT: u32 = 5;
+const KVM_EXIT_MMIO: u32 = 6;
+const KVM_EXIT_SHUTDOWN: u32 = 8;
+const KVM_EXIT_FAIL_ENTRY: u32 = 9;
+const KVM_EXIT_INTERNAL_ERROR: u32 = 17;
+
+const KVM_INTERNAL_ERROR_EMULATION: u32 = 1;
+const KVM_INTERNAL_ERROR_SIMUL_EX: u32 = 2;
+const KVM_INTERNAL_ERROR_DELIVERY_EV: u32 = 3;
+const KVM_INTERNAL_ERROR_UNEXPECTED_EXIT_REASON: u32 = 4;
+
 
 #[derive(Parser, Debug)]
 #[command(version, about)]
@@ -148,7 +158,7 @@ impl VM {
 
         // 140900 ioctl(9<anon_inode:kvm-vm>, 0x4020ae46 /* KVM_SET_USER_MEMORY_REGION */, {slot=0, flags=0, guest_phys_addr=0, memory_size=1073741824, userspace_addr=0x7768b3e00000}) = 0
         let region = kvm_userspace_memory_region {
-            slot : 0,
+            slot : self.mem_regions.len() as u32,
             flags : 0,
             guest_phys_addr : guest_phys_addr,
             memory_size : mem_size as u64,
@@ -190,7 +200,7 @@ impl VM {
         let mut res = Vec::new();
         file.read_to_end(&mut res)?;
 
-        println!("Loading {:?} at {:#x}...", path, offset + self.mem_regions[mem_region_idx].guest_phys_addr);
+        println!("Loading {:?} at {:#x}...\r", path, offset + self.mem_regions[mem_region_idx].guest_phys_addr);
 
         self.load_data_to_memory(mem_region_idx, res, offset)
     }
@@ -260,15 +270,19 @@ fn main() -> io::Result<()> {
     let kvm_dev = KvmDev::new()?;
     let mut vm = kvm_dev.create_vm()?;
 
+    arch::arch_pre_vcpu_init(&kvm_dev, &mut vm);
+
     let mut vcpu = vm.create_vcpu()?;
 
+    println!("\nKVM Rust\r");
+
+    arch::arch_init(&kvm_dev, &mut vm, &mut vcpu)?;
+
     vm.init_mmio_devices()?;
-    arch::arch_init(&mut vm, &mut vcpu)?;
     vcpu.set_ip(args.load_addr as usize)?;
-    vcpu.print_regs()?;
 
     if let Err(e) = vm.load_linux(&mut vcpu, &args) {
-        println!("Binary is not a bootable Linux image for this architecture. Attempting raw...");
+        println!("Binary is not a bootable Linux image for this architecture. Attempting raw...\r");
         let mem_region_idx = vm.add_mem_region(args.memory * 1024, 0x0)?;
         vm.load_file_to_memory(mem_region_idx, &args.binary, args.load_addr)?;
     }
@@ -298,16 +312,27 @@ fn main() -> io::Result<()> {
                 let io = unsafe { (*run).__bindgen_anon_1.io };
                 let port = io.port;
                 let direction = io.direction;
-                let size = io.size;
-                let data_offset = io.data_offset;
-                if direction == 0 {
-                    let base = vcpu.kvm_run_mem as *const u8;
-                    let data_ptr = unsafe { base.add(io.data_offset as usize) };
-                    let value = unsafe { *(data_ptr as *const u16) };
-                    print!("{}", value);
+                let size = io.size as usize;
+                let count = io.count as usize;
+                let offset = io.data_offset as usize;
+                let base = vcpu.kvm_run_mem as *mut u8;
+                let data = unsafe {
+                    std::slice::from_raw_parts_mut(base.add(offset), size * count)
+                };
+                match (direction, port) {
+                    (KVM_EXIT_IO_OUT, 0x3f8) => {
+                        print!("{}", data[0] as char);
+                        io::stdout().flush().ok();
+                    }
+                    (KVM_EXIT_IO_IN, 0x3fd) => data[0] = 0x60,   // LSR: THRE | TEMT
+                    (KVM_EXIT_IO_IN, 0x3f8..=0x3ff) => data[0] = 0x00,
+                    (KVM_EXIT_IO_OUT, _) => {},                   // swallow
+                    (KVM_EXIT_IO_IN, _) => data[0] = 0xff,       // no device
+                    (_, _) => data[0] = 0xff
                 } }
             KVM_EXIT_SHUTDOWN => {
                 println!("Guest shutdown.");
+                vcpu.print_regs()?;
                 break; }
             KVM_EXIT_MMIO => {
                 let mmio = unsafe { &mut (*run).__bindgen_anon_1.mmio };
@@ -317,9 +342,23 @@ fn main() -> io::Result<()> {
                 println!("Guest halted.");
                 break; }
             KVM_EXIT_INTERNAL_ERROR => {
-                return Err(io::Error::other("KVM internal error.")); }
+                let internal = unsafe { (*run).__bindgen_anon_1.internal };
+                println!("suberror: {:#x}", internal.suberror);
+                for i in 0..internal.ndata {
+                    println!("{:4}: {:#x}", i, internal.data[i as usize]);
+                }
+                return Err(io::Error::other("KVM internal error."));
+            }
+            KVM_EXIT_FAIL_ENTRY => {
+                let fail_entry = unsafe { (*run).__bindgen_anon_1.fail_entry };
+                let reason = fail_entry.hardware_entry_failure_reason;
+                let cpu = fail_entry.cpu;
+                println!("Fail entry: reason={:#x}, cpu={}", reason, cpu);
+                break;
+            }
             _ => {
                 println!("EXIT REASON = {}", exit_reason);
+                break;
             }
         }
     }
