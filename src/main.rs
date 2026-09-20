@@ -175,7 +175,7 @@ impl VM {
         Ok(self.mem_regions.len() - 1)
     }
 
-    fn load_data_to_memory(&self, mem_region_idx: usize, data: Vec<u8>, offset: u64) -> io::Result<()> {
+    fn load_data_to_memory(&self, mem_region_idx: usize, data: Vec<u8>, offset: u64) -> io::Result<usize> {
         let mem_region = self.mem_regions.get(mem_region_idx).ok_or(io::Error::other("Index exceeds memory region vector."))?;
 
         if (offset as usize) >= mem_region.mem_size {
@@ -183,7 +183,7 @@ impl VM {
         }
 
         if (offset as usize) + data.len() > mem_region.mem_size {
-            return Err(io::Error::other("Data would exceed memory region."));
+            return Err(io::Error::other(format!("Data ({:#x} {:#x}) would exceed memory region ({}).", offset, data.len(), mem_region.mem_size)));
         }
 
         unsafe {
@@ -192,10 +192,10 @@ impl VM {
                                           data.len());
         };
 
-        Ok(())
+        Ok(data.len())
     }
 
-    fn load_file_to_memory(&self, mem_region_idx: usize, path: &str, offset: u64) -> io::Result<()> {
+    fn load_file_to_memory(&self, mem_region_idx: usize, path: &str, offset: u64) -> io::Result<usize> {
         let mut file = File::open(path)?;
         let mut res = Vec::new();
         file.read_to_end(&mut res)?;
