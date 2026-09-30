@@ -231,18 +231,36 @@ impl VM {
         let mut regs = vcpu.get_regs()?;
         regs.rip = pvh_entrypoint;
         regs.rbx = hvm_base;
-        regs.rflags = 0x2;
+        regs.rflags = 0x2; // bits 17, 9 and 8 cleared, all other unspecified
         vcpu.set_regs(regs);
         regs.print();
 
         let mut sregs2 = vcpu.get_sregs2()?;
         let code = kvm_segment {
-            base: 0, limit: 0xffff_ffff, selector: 1 << 3,
-            type_: 0b1010,
-            present: 1, dpl: 0, db: 1, s: 1, l: 0, g: 1,
-            avl: 0, unusable: 0, padding: 0,
+            base: 0,
+            limit: 0xffff_ffff,
+            selector: 1 << 3,
+            type_: 0b1010, // 3rd bit: code
+                           // 2nd bit: not comforming
+                           // 1st bit: read/write
+                           // 0th bit: not accessed
+            present: 1,
+            dpl: 0, // descriptor privilege level (0: kernel .. 3: userspace)
+            db: 1,  // default operand / address size (0: 16bit, 1: 32bit)
+            s: 1,   // system (1: code/data segment, 0: system segment)
+            l: 0,   // long mode (0: not 64bit segment, 1: 64bit segment)
+            g: 1,   // granularity (0: limit in bytes, 1: limit in 4Kb blocks)
+            avl: 0, // available for software (reserved for custom OS purposes)
+            unusable: 0,
+            padding: 0,
         };
-        let data = kvm_segment { selector: 2 << 3, type_: 0b0010, ..code };
+        let data = kvm_segment {
+            selector: 2 << 3,
+            type_: 0b0010, // 3rd bit: data
+                           // 2nd bit: not comforming
+                           // 1st bit: read/write
+                           // 0th bit: not accessed
+            ..code };
 
         sregs2.cs = code;
         sregs2.ds = data;
@@ -252,16 +270,17 @@ impl VM {
         sregs2.ss = data;
 
         sregs2.tr = kvm_segment {
-            base: 0, limit: 0x67, selector: 3 << 3,
-            type_: 11, s: 0, present: 1, dpl: 0, db: 0, l: 0, g: 0,
-            avl: 0, unusable: 0, padding: 0,
-        };
-        sregs2.ldt = kvm_segment { unusable: 1, ..sregs2.tr };
+            base: 0,
+            limit: 0x67, // as per Xen project PVH protocol
 
-        sregs2.cr0 = 0x1;
-        sregs2.cr4 = 0x0;
+            g: 0,        // both g and s set to 0 were
+            s: 0,        // experimentally confirmed as required
+            ..code };    // (despite documentation claims on
+                         //  other bits being undefined)
+
+        sregs2.cr0 = 0x1; // PE (Protected Mode) bit enabled
+        sregs2.cr4 = 0x0; // all bits cleared as per PVH protocol
         vcpu.set_sregs2(sregs2);
-
 
         Ok(())
     }

@@ -11,11 +11,15 @@ use std::sync::atomic::{AtomicBool, Ordering, AtomicU64};
 use std::io::Write;
 
 type MMIO = kvm_run__bindgen_ty_1__bindgen_ty_6;
+type IO = kvm_run__bindgen_ty_1__bindgen_ty_4;
 type MMIODevices = HashMap::<u64, Arc<Mutex<dyn MMIODevice>>>;
-const KVM_EXIT_IO_OUT: u8 = 1;
-const KVM_EXIT_IO_IN: u8 = 0;
+type IODevices = HashMap::<u64, Arc<Mutex<dyn IODevice>>>;
+
 trait MMIODevice {
     fn handle(&mut self, vm_fd: libc::c_int, mmio: &mut MMIO) -> io::Result<()>;
+}
+trait IODevice {
+    fn handle(&mut self, io: &IO, base: *mut u8) -> io::Result<()>;
 }
 
 static SHOULD_STOP: AtomicBool = AtomicBool::new(false);
@@ -100,7 +104,7 @@ impl KvmDev {
             return Err(io::Error::last_os_error());
         }
 
-        Ok(VM { fd: vm_fd, mem_regions: Vec::<MemRegion>::new(), mmio_devices: MMIODevices::new() })
+        Ok(VM { fd: vm_fd, mem_regions: Vec::<MemRegion>::new(), mmio_devices: MMIODevices::new(), io_devices: IODevices::new() })
     }
 
     fn fd(&self) -> libc::c_int {
@@ -115,7 +119,8 @@ impl KvmDev {
 pub struct VM {
     pub fd: libc::c_int,
     pub mem_regions: Vec<MemRegion>,
-    pub mmio_devices: MMIODevices
+    pub mmio_devices: MMIODevices,
+    pub io_devices: IODevices
 }
 
 pub struct MemRegion {
@@ -213,8 +218,16 @@ impl VM {
         self.arch_init_mmio_devices()
     }
 
+    fn init_io_devices(&mut self) -> io::Result<()> {
+        self.arch_init_io_devices()
+    }
+
     fn handle_mmio(&mut self, mmio: &mut MMIO) -> io::Result<()> {
         self.arch_handle_mmio(mmio)
+    }
+
+    fn handle_io(&mut self, io: &IO, base: *mut u8) -> io::Result<()> {
+        self.arch_handle_io(io, base)
     }
 }
 
@@ -279,6 +292,7 @@ fn main() -> io::Result<()> {
     arch::arch_init(&kvm_dev, &mut vm, &mut vcpu)?;
 
     vm.init_mmio_devices()?;
+    vm.init_io_devices()?;
     vcpu.set_ip(args.load_addr as usize)?;
 
     if let Err(e) = vm.load_linux(&mut vcpu, &args) {
@@ -310,26 +324,8 @@ fn main() -> io::Result<()> {
         match exit_reason {
             KVM_EXIT_IO => {
                 let io = unsafe { (*run).__bindgen_anon_1.io };
-                let port = io.port;
-                let direction = io.direction;
-                let size = io.size as usize;
-                let count = io.count as usize;
-                let offset = io.data_offset as usize;
-                let base = vcpu.kvm_run_mem as *mut u8;
-                let data = unsafe {
-                    std::slice::from_raw_parts_mut(base.add(offset), size * count)
-                };
-                match (direction, port) {
-                    (KVM_EXIT_IO_OUT, 0x3f8) => {
-                        print!("{}", data[0] as char);
-                        io::stdout().flush().ok();
-                    }
-                    (KVM_EXIT_IO_IN, 0x3fd) => data[0] = 0x60,   // LSR: THRE | TEMT
-                    (KVM_EXIT_IO_IN, 0x3f8..=0x3ff) => data[0] = 0x00,
-                    (KVM_EXIT_IO_OUT, _) => {},                   // swallow
-                    (KVM_EXIT_IO_IN, _) => data[0] = 0xff,       // no device
-                    (_, _) => data[0] = 0xff
-                } }
+                vm.handle_io(&io, vcpu.kvm_run_mem as *mut u8);
+}
             KVM_EXIT_SHUTDOWN => {
                 println!("Guest shutdown.");
                 vcpu.print_regs()?;
