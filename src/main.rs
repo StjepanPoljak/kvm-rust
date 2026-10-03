@@ -16,7 +16,7 @@ type MMIODevices = HashMap::<u64, Arc<Mutex<dyn MMIODevice>>>;
 type IODevices = HashMap::<u64, Arc<Mutex<dyn IODevice>>>;
 
 trait MMIODevice {
-    fn handle(&mut self, vm_fd: libc::c_int, mmio: &mut MMIO) -> io::Result<()>;
+    fn handle(&mut self, mmio: &mut MMIO) -> io::Result<()>;
 }
 trait IODevice {
     fn handle(&mut self, io: &IO, base: *mut u8) -> io::Result<()>;
@@ -28,16 +28,17 @@ static MAIN_TID: AtomicU64 = AtomicU64::new(0);
 include!(concat!(env!("OUT_DIR"), "/kvm-bindings.rs"));
 
 include!("util.rs");
+include!("serial.rs");
 include!("arch/mod.rs");
 
 pub const KVMIO: u32 = 0xae;
 
-const KVM_CREATE_VM: u64 = _IO(KVMIO, 0x01);
-const KVM_CREATE_VCPU: u64 = _IO(KVMIO, 0x41);
-const KVM_GET_VCPU_MMAP_SIZE: u64 = _IO(KVMIO, 0x04);
+const KVM_CREATE_VM: libc::Ioctl = _IO(KVMIO, 0x01);
+const KVM_CREATE_VCPU: libc::Ioctl = _IO(KVMIO, 0x41);
+const KVM_GET_VCPU_MMAP_SIZE: libc::Ioctl = _IO(KVMIO, 0x04);
 
-const KVM_SET_USER_MEMORY_REGION: u64 = _IOW::<kvm_userspace_memory_region>(KVMIO, 0x46);
-const KVM_RUN: u64 = _IO(KVMIO, 0x80);
+const KVM_SET_USER_MEMORY_REGION: libc::Ioctl = _IOW::<kvm_userspace_memory_region>(KVMIO, 0x46);
+const KVM_RUN: libc::Ioctl = _IO(KVMIO, 0x80);
 
 const KVM_EXIT_IO: u32 = 2;
 const KVM_EXIT_HLT: u32 = 5;

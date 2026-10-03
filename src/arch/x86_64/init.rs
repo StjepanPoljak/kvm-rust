@@ -8,10 +8,10 @@ use object::read::elf::{ElfFile64, ProgramHeader, SectionHeader};
 use object::{Endianness, Object, ObjectSection};
 
 use std::io::{self, Read};
-const KVM_CREATE_IRQCHIP: u64 = _IO(KVMIO, 0x60);
-const KVM_CREATE_PIT2: u64 = _IOW::<kvm_pit_config>(KVMIO, 0x77);
-const KVM_GET_SUPPORTED_CPUID: u64 = _IOWR::<kvm_cpuid2>(KVMIO, 0x05);
-const KVM_SET_CPUID2: u64 = _IOW::<kvm_cpuid2>(KVMIO, 0x90);
+const KVM_CREATE_IRQCHIP: libc::Ioctl = _IO(KVMIO, 0x60);
+const KVM_CREATE_PIT2: libc::Ioctl = _IOW::<kvm_pit_config>(KVMIO, 0x77);
+const KVM_GET_SUPPORTED_CPUID: libc::Ioctl = _IOWR::<kvm_cpuid2>(KVMIO, 0x05);
+const KVM_SET_CPUID2: libc::Ioctl = _IOW::<kvm_cpuid2>(KVMIO, 0x90);
 
 pub fn arch_pre_vcpu_init(kvm_dev: &KvmDev, vm: &mut VM) -> io::Result<()> {
     let ret = unsafe { libc::ioctl(vm.fd, KVM_CREATE_IRQCHIP, 0x0) };

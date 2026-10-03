@@ -15,6 +15,7 @@ RUN set -e;                                                     \
         ca-certificates curl build-essential bison              \
         libclang-dev python3 bc flex libssl-dev                 \
         gcc-${ARCH}-linux-gnu                                   \
+        libc6-dev-${kernel_arch}-cross                          \
         linux-libc-dev-${kernel_arch}-cross;                    \
     rm -rf /var/lib/apt/lists/*
 

@@ -1,5 +1,5 @@
 use std::io::self;
-use crate::{ VM, MMIO, MMIODevice, KVMIO, MAIN_TID };
+use crate::{ VM, MMIO, MMIODevice, KVMIO, MAIN_TID, TTY, start_tty };
 use crate::{ write_le32, read_le32 };
 use std::collections::HashMap;
 use libc::_IOW;
@@ -12,10 +12,10 @@ use std::sync::atomic::{ Ordering, AtomicU64 };
 
 include!(concat!(env!("OUT_DIR"), "/kvm-bindings.rs"));
 
-const KVM_IRQ_LINE : u64 = _IOW::<kvm_irq_level>(KVMIO, 0x61);
+const KVM_IRQ_LINE: libc::Ioctl = _IOW::<kvm_irq_level>(KVMIO, 0x61);
 
 pub struct UART {
-    rx: Option<u32>,
+    rx: Option<u8>,
     fr: u32, // 0x18
     cr: u32,   // 0x30
     imsc: u32,   // 0x38
@@ -23,7 +23,16 @@ pub struct UART {
     ibrd: u32,   // 0x24
     fbrd: u32,   // 0x28
     ris: u32,    // 0x3c
-    icr: u32 // 0x44
+    icr: u32, // 0x44
+    vm_fd: libc::c_int
+}
+
+impl TTY for UART {
+    fn send_char(&mut self, ch: u8) -> io::Result<()> {
+        self.rx = Some(ch);
+        self.ris |= 1 << 4;
+        self.update_irq()
+    }
 }
 
 pub fn arch_update_irq(level: u32, vm_fd: libc::c_int) -> io::Result<()> {
@@ -44,7 +53,7 @@ pub fn arch_update_irq(level: u32, vm_fd: libc::c_int) -> io::Result<()> {
 
 impl MMIODevice for UART {
 
-    fn handle(&mut self, vm_fd: libc::c_int, mmio: &mut MMIO) -> io::Result<()> {
+    fn handle(&mut self, mmio: &mut MMIO) -> io::Result<()> {
         let mmio_reg = mmio.phys_addr & 0xfff;
         if (mmio.is_write != 0) && mmio_reg == 0x0 {
             /* we take only first u8 element of data */
@@ -52,7 +61,7 @@ impl MMIODevice for UART {
             io::stdout().flush()?;
         } else if mmio.is_write == 0 {
             let resp = Vec::<u8>::new();
-            write_le32(&mut mmio.data, 0, self.pl011_response(vm_fd, (mmio_reg) as u32)?);
+            write_le32(&mut mmio.data, 0, self.pl011_response((mmio_reg) as u32)?);
         } else if mmio.is_write != 0 {
             let val = read_le32(&mmio.data, 0);
             match mmio_reg {
@@ -61,9 +70,9 @@ impl MMIODevice for UART {
                 0x2c => { self.lcr = val; },
                 0x30 => { self.cr = val; },
                 0x38 => { self.imsc = val;
-                          self.update_irq(vm_fd)?; }
+                          self.update_irq()?; }
                 0x44 => { self.ris &= !val;
-                          self.update_irq(vm_fd)?; }
+                          self.update_irq()?; }
                 _ => ()
             }
         }
@@ -84,50 +93,16 @@ static PL011_ID_MAP: LazyLock<HashMap<u32, u32>> = LazyLock::new(|| {
 });
 
 impl UART {
-    fn send_char(&mut self, vm_fd: libc::c_int, ch: u32) -> io::Result<()> {
-        self.rx = Some(ch);
-        self.ris |= 1 << 4;
-        self.update_irq(vm_fd)
-    }
-
     fn new(vm_fd: libc::c_int) -> io::Result<Arc<Mutex<Self>>> {
         let uart = Arc::new(Mutex::new(UART {
-            fr: 0x90, cr: 0x0, imsc: 0x0, lcr: 0x0, ibrd: 0x0, fbrd: 0x0, icr: 0x0, ris: 0x0, rx: None
+            fr: 0x90, cr: 0x0, imsc: 0x0, lcr: 0x0, ibrd: 0x0, fbrd: 0x0, icr: 0x0, ris: 0x0, rx: None, vm_fd
         }));
 
-        let uart_async = uart.clone();
-        std::thread::spawn(move || {
-            let mut is_escape = false;
-            let raw = stdout().into_raw_mode().unwrap();
-            const QUIT_BYTE : u8 = 'x' as u8;
-
-            for byte in stdin().bytes() {
-                let b = byte.unwrap();
-
-                if !is_escape && b == 0x01 {
-                    is_escape = true;
-                    continue;
-                } else if is_escape {
-                    is_escape = false;
-                    match b {
-                        QUIT_BYTE => { break; },
-                        0x01 => (),
-                        _ => { continue; }
-                    };
-                }
-
-                uart_async.lock().unwrap().send_char(vm_fd, b as u32).unwrap();
-            }
-
-            drop(raw);
-            let tid = MAIN_TID.load(Ordering::SeqCst) as libc::pthread_t;
-            unsafe { libc::pthread_kill(tid, libc::SIGINT); }
-        });
-
+        start_tty(uart.clone());
         Ok(uart)
     }
 
-    fn pl011_response(&mut self, vm_fd: libc::c_int, inb: u32) -> io::Result<u32> {
+    fn pl011_response(&mut self, inb: u32) -> io::Result<u32> {
         if let Some(ret) = PL011_ID_MAP.get(&inb) {
             return Ok(*ret);
         }
@@ -135,8 +110,8 @@ impl UART {
         match inb {
             0x0 => { let ch = self.rx.take().unwrap_or(0);
                      self.ris &= !(1 << 4);
-                     self.update_irq(vm_fd)?;
-                     return Ok(ch);
+                     self.update_irq()?;
+                     return Ok(ch as u32);
             },
             0x18 => Ok(0x80 | if self.rx.is_none() { 0x10 } else { 0 } ),
             0x24 => Ok(self.ibrd),
@@ -151,8 +126,8 @@ impl UART {
         }
     }
 
-    pub fn update_irq(&mut self, vm_fd: libc::c_int) -> io::Result<()> {
-        arch_update_irq(((self.ris & self.imsc) != 0) as u32, vm_fd)
+    pub fn update_irq(&mut self) -> io::Result<()> {
+        arch_update_irq(((self.ris & self.imsc) != 0) as u32, self.vm_fd)
     }
 }
 
@@ -166,7 +141,7 @@ impl VM {
     pub fn arch_handle_mmio(&mut self, mmio: &mut MMIO) -> io::Result<()> {
         let page = mmio.phys_addr >> 12;
         if let Some(device) = self.mmio_devices.get_mut(&page) {
-            device.lock().unwrap().handle(self.fd, mmio)?;
+            device.lock().unwrap().handle(mmio)?;
         }
 
         Ok(())

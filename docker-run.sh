@@ -14,5 +14,6 @@ fi
 
 docker run --network host -it --rm \
        -v "$(pwd)":"/home/docker/kvm-rust" \
+       -e RUSTFLAGS="-C target-feature=+crt-static" \
        ${ARCH}-rust-build \
        cargo build --release --target=${ARCH}-unknown-linux-gnu

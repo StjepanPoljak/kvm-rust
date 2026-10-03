@@ -9,15 +9,15 @@ use std::io::{self, Read};
 
 use crate::KVMIO;
 
-const KVM_CREATE_DEVICE : u64 = _IOWR::<kvm_create_device>(KVMIO, 0xe0);
-const KVM_SET_DEVICE_ATTR : u64 = _IOW::<kvm_device_attr>(KVMIO, 0xe1);
+const KVM_CREATE_DEVICE: libc::Ioctl = _IOWR::<kvm_create_device>(KVMIO, 0xe0);
+const KVM_SET_DEVICE_ATTR: libc::Ioctl = _IOW::<kvm_device_attr>(KVMIO, 0xe1);
 
-const KVM_ARM_DEVICE_VGIC_V2 : u32 = 0x5;
-const KVM_VGIC_V2_ADDR_TYPE_DIST : u64 = 0x0;
-const KVM_VGIC_V2_DIST_SIZE : usize = 0x1000;
-const KVM_VGIC_V2_CPU_SIZE : usize = 0x2000;
-const KVM_VGIC_V2_ADDR_TYPE_CPU : u64 = 0x1;
-const KVM_DEV_ARM_VGIC_GRP_ADDR : u32 = 0x0;
+const KVM_ARM_DEVICE_VGIC_V2: u32 = 0x5;
+const KVM_VGIC_V2_ADDR_TYPE_DIST: u64 = 0x0;
+const KVM_VGIC_V2_DIST_SIZE: usize = 0x1000;
+const KVM_VGIC_V2_CPU_SIZE: usize = 0x2000;
+const KVM_VGIC_V2_ADDR_TYPE_CPU: u64 = 0x1;
+const KVM_DEV_ARM_VGIC_GRP_ADDR: u32 = 0x0;
 
 pub fn arch_pre_vcpu_init(kvm_dev: &KvmDev, vm: &mut VM) -> io::Result<()> {
     Ok(())

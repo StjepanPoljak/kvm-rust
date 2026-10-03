@@ -5,10 +5,10 @@ use crate::{kvm_regs, kvm_sregs2, kvm_dtable, kvm_segment};
 use crate::KVMIO;
 use crate::VCPU;
 
-const KVM_GET_SREGS2 : u64 = _IOR::<kvm_sregs2>(KVMIO, 0xcc);
-const KVM_SET_SREGS2 : u64 = _IOW::<kvm_sregs2>(KVMIO, 0xcd);
-const KVM_GET_REGS : u64 = _IOR::<kvm_regs>(KVMIO, 0x81);
-const KVM_SET_REGS : u64 = _IOW::<kvm_regs>(KVMIO, 0x82);
+const KVM_GET_SREGS2: libc::Ioctl = _IOR::<kvm_sregs2>(KVMIO, 0xcc);
+const KVM_SET_SREGS2: libc::Ioctl = _IOW::<kvm_sregs2>(KVMIO, 0xcd);
+const KVM_GET_REGS: libc::Ioctl = _IOR::<kvm_regs>(KVMIO, 0x81);
+const KVM_SET_REGS: libc::Ioctl = _IOW::<kvm_regs>(KVMIO, 0x82);
 
 impl kvm_regs {
     pub fn print(&self) {
