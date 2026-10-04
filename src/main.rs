@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::sync::{Arc,Mutex};
 use std::sync::atomic::{AtomicBool, Ordering, AtomicU64};
 use std::io::Write;
+use crate::load_elf;
 
 type MMIO = kvm_run__bindgen_ty_1__bindgen_ty_6;
 type IO = kvm_run__bindgen_ty_1__bindgen_ty_4;
@@ -56,14 +57,19 @@ const KVM_INTERNAL_ERROR_UNEXPECTED_EXIT_REASON: u32 = 4;
 #[command(version, about)]
 struct Args {
     /// Binary to run
-    binary: String,
+    #[arg(short, long)]
+    binary: Option<String>,
+
+    /// vmlinux or Image to run
+    #[arg(long)]
+    linux: Option<String>,
 
     /// Memory size in kilobytes
     #[arg(short, long, default_value_t = 256)]
     memory: usize,
 
     /// Load address
-    #[arg(short, long, default_value_t = 0x1000)]
+    #[arg(long, default_value_t = 0x1000)]
     load_addr: u64,
 
     /// Device tree blob
@@ -295,10 +301,11 @@ fn main() -> io::Result<()> {
     vm.init_io_devices()?;
     vcpu.set_ip(args.load_addr as usize)?;
 
-    if let Err(e) = vm.load_linux(&mut vcpu, &args) {
-        println!("Binary is not a bootable Linux image for this architecture. Attempting raw...\r");
+    if let Some(_) = args.linux {
+        vm.load_linux(&mut vcpu, &args).unwrap();
+    } else if let Some(binary) = args.binary {
         let mem_region_idx = vm.add_mem_region(args.memory * 1024, 0x0)?;
-        vm.load_file_to_memory(mem_region_idx, &args.binary, args.load_addr)?;
+        vm.load_file_to_memory(mem_region_idx, &binary, args.load_addr)?;
     }
 
     vcpu.set_kvm_run_mem(kvm_dev.get_kvm_run_size())?;
