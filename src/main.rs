@@ -1,6 +1,11 @@
+include!(concat!(env!("OUT_DIR"), "/kvm-bindings.rs"));
+
+include!("frontend/mod.rs");
+include!("util/mod.rs");
+include!("arch/mod.rs");
+
 use std::fs::OpenOptions;
 use std::os::unix::io::AsRawFd;
-use std::ptr;
 use clap::Parser;
 use std::fs::File;
 use std::io::{self, Read};
@@ -18,18 +23,13 @@ type IODevices = HashMap::<u64, Arc<Mutex<dyn IODevice>>>;
 trait MMIODevice {
     fn handle(&mut self, mmio: &mut MMIO) -> io::Result<()>;
 }
+
 trait IODevice {
     fn handle(&mut self, io: &IO, base: *mut u8) -> io::Result<()>;
 }
 
 static SHOULD_STOP: AtomicBool = AtomicBool::new(false);
 static MAIN_TID: AtomicU64 = AtomicU64::new(0);
-
-include!(concat!(env!("OUT_DIR"), "/kvm-bindings.rs"));
-
-include!("util.rs");
-include!("serial.rs");
-include!("arch/mod.rs");
 
 pub const KVMIO: u32 = 0xae;
 
@@ -51,7 +51,6 @@ const KVM_INTERNAL_ERROR_EMULATION: u32 = 1;
 const KVM_INTERNAL_ERROR_SIMUL_EX: u32 = 2;
 const KVM_INTERNAL_ERROR_DELIVERY_EV: u32 = 3;
 const KVM_INTERNAL_ERROR_UNEXPECTED_EXIT_REASON: u32 = 4;
-
 
 #[derive(Parser, Debug)]
 #[command(version, about)]
@@ -151,7 +150,7 @@ impl VM {
         // 140900 mmap(NULL, 1075838976, 0 /* PROT_NONE */, 0x22 /* MAP_PRIVATE|MAP_ANONYMOUS */, -1, 0) = 0x7768b3e00000
         // 140900 mmap(0x7768b3e00000, 1073741824, 0x3 /* PROT_READ|PROT_WRITE */, 0x32 /* MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS */, -1, 0) = 0x7768b3e00000
         let mem_ptr = unsafe {
-            libc::mmap(ptr::null_mut(),
+            libc::mmap(std::ptr::null_mut(),
                        mem_size as usize,
                        libc::PROT_READ|libc::PROT_WRITE,
                        libc::MAP_PRIVATE|libc::MAP_ANONYMOUS,
@@ -247,7 +246,7 @@ impl VCPU {
     fn set_kvm_run_mem(&mut self, kvm_run_size: usize) -> io::Result<()> {
         // 140904 mmap(NULL, 12288, 0x3 /* PROT_READ|PROT_WRITE */, 0x1 /* MAP_SHARED */, 10<anon_inode:kvm-vcpu:0>, 0) = 0x7769050b0000
         self.kvm_run_mem = unsafe {
-            libc::mmap(ptr::null_mut(),
+            libc::mmap(std::ptr::null_mut(),
                        kvm_run_size as usize,
                        libc::PROT_READ|libc::PROT_WRITE,
                        libc::MAP_SHARED,
@@ -326,7 +325,7 @@ fn main() -> io::Result<()> {
             KVM_EXIT_IO => {
                 let io = unsafe { (*run).__bindgen_anon_1.io };
                 vm.handle_io(&io, vcpu.kvm_run_mem as *mut u8);
-}
+            }
             KVM_EXIT_SHUTDOWN => {
                 println!("Guest shutdown.");
                 vcpu.print_regs()?;

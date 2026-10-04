@@ -1,4 +1,4 @@
-use std::io::self;
+use std::io::{ self };
 use crate::{ VM, MMIO, MMIODevice, KVMIO, MAIN_TID, TTY, start_tty };
 use crate::{ write_le32, read_le32 };
 use std::collections::HashMap;
@@ -8,7 +8,6 @@ use std::thread;
 use std::sync::{ Arc, Mutex, LazyLock };
 use std::io::{ stdin, stdout, Read, Write };
 use termion::raw::IntoRawMode;
-use std::sync::atomic::{ Ordering, AtomicU64 };
 
 include!(concat!(env!("OUT_DIR"), "/kvm-bindings.rs"));
 

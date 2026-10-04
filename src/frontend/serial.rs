@@ -1,5 +1,9 @@
+use std::io::{ self };
 use termion::raw::IntoRawMode;
-use std::io::{ stdin, stdout };
+use std::io::{ stdin, stdout, Read, Write };
+use crate::{ MAIN_TID };
+use std::sync::atomic::{ Ordering, AtomicU64 };
+use std::sync::{ Arc, Mutex };
 
 pub trait TTY: Send {
     fn send_char(&mut self, ch: u8) -> io::Result<()>;
