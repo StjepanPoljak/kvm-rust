@@ -6,8 +6,8 @@ use libc::{_IOW, _IO, _IOR, _IOWR};
 use object::elf;
 use object::read::elf::{ElfFile64, SectionHeader};
 use object::{Endianness, Object, ObjectSection};
-
 use std::io::{self, Read};
+
 const KVM_CREATE_IRQCHIP: libc::Ioctl = _IO(KVMIO, 0x60);
 const KVM_CREATE_PIT2: libc::Ioctl = _IOW::<kvm_pit_config>(KVMIO, 0x77);
 const KVM_GET_SUPPORTED_CPUID: libc::Ioctl = _IOWR::<kvm_cpuid2>(KVMIO, 0x05);
@@ -122,7 +122,7 @@ impl VM {
 
         let last_addr = load_elf(self, &vmlinux, &vmlinux_data, linux_mem_idx);
 
-        let mut cmdline = String::from("console=ttyS0,115200");
+        let mut cmdline = String::from("console=ttyS0,115200 virtio_mmio.device=4K@0xd0000000:5");
         let mut modlist_entries = vec![];
 
         let hvm_base: u64 = 0x10000;

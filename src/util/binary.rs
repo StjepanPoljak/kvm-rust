@@ -20,6 +20,10 @@ pub fn write_le32(b: &mut [u8], o: usize, val: u32) -> () {
     b[o..(o + 4)].copy_from_slice(&val.to_le_bytes());
 }
 
+pub fn write_le64(b: &mut [u8], o: usize, val: u64) -> () {
+    b[o..(o + 8)].copy_from_slice(&val.to_le_bytes());
+}
+
 pub fn read_string(b: &[u8], o: usize) -> io::Result<String> {
     let end = b[o..]
         .iter()
