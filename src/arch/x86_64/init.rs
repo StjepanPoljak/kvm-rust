@@ -122,7 +122,7 @@ impl VM {
 
         let last_addr = load_elf(self, &vmlinux, &vmlinux_data, linux_mem_idx);
 
-        let mut cmdline = String::from("console=ttyS0,115200 virtio_mmio.device=4K@0xd0000000:5");
+        let mut cmdline = String::from("console=ttyS0,115200 root=/dev/vda virtio_mmio.device=4K@0xd0000000:5");
         let mut modlist_entries = vec![];
 
         let hvm_base: u64 = 0x10000;

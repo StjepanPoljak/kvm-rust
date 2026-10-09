@@ -129,6 +129,10 @@ pub struct VM {
     pub io_devices: IODevices
 }
 
+pub struct GuestMemory {
+    pub mem_regions: Vec<MemRegion>
+}
+
 pub struct MemRegion {
     pub mem_ptr: *mut libc::c_void,
     pub mem_size: usize,

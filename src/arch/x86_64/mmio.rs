@@ -3,24 +3,34 @@ use crate::{ VM, MMIO, MMIODevice };
 use crate::{ read_le32, write_le32, read_le64, write_le64 };
 use std::sync::{ Arc, Mutex };
 
+include!(concat!(env!("OUT_DIR"), "/virtio-blk-bindings.rs"));
+
 const VIRTIO_VERSION: u32 = 0x2;
 const VIRTIO_ID_BLOCK: u32 = 0x2;
 const VIRTIO_VENDOR_NONE: u32 = 0x0;
 
-const VIRTIO_MMIO_MAGIC_VALUE: u64 =	0x000;
-const VIRTIO_MMIO_VERSION: u64 =	0x004;
-const VIRTIO_MMIO_DEVICE_ID: u64 =	0x008;
-const VIRTIO_MMIO_VENDOR_ID: u64 =	0x00c;
-
-
-const VIRTIO_MMIO_DEVICE_FEATURES: u64 = 0x10;
-const VIRTIO_MMIO_DEVICE_FEATURES_SEL: u64 = 0x14;
-const VIRTIO_MMIO_DRIVER_FEATURES: u64 = 0x20;
-const VIRTIO_MMIO_DRIVER_FEATURES_SEL: u64 = 0x24;
-const VIRTIO_MMIO_QUEUE_SEL: u64 = 0x30;
-const VIRTIO_MMIO_QUEUE_NUM_MAX: u64 = 0x34;
-const VIRTIO_MMIO_QUEUE_NUM: u64 = 0x38;
-const VIRTIO_MMIO_QUEUE_READY: u64 = 0x44;
+const VIRTIO_MMIO_MAGIC_VALUE: u64          = 0x000;
+const VIRTIO_MMIO_VERSION: u64              = 0x004;
+const VIRTIO_MMIO_DEVICE_ID: u64            = 0x008;
+const VIRTIO_MMIO_VENDOR_ID: u64            = 0x00c;
+const VIRTIO_MMIO_DEVICE_FEATURES: u64      = 0x010;
+const VIRTIO_MMIO_DEVICE_FEATURES_SEL: u64  = 0x014;
+const VIRTIO_MMIO_DRIVER_FEATURES: u64      = 0x020;
+const VIRTIO_MMIO_DRIVER_FEATURES_SEL: u64  = 0x024;
+const VIRTIO_MMIO_QUEUE_SEL: u64            = 0x030;
+const VIRTIO_MMIO_QUEUE_NUM_MAX: u64        = 0x034;
+const VIRTIO_MMIO_QUEUE_NUM: u64            = 0x038;
+const VIRTIO_MMIO_QUEUE_READY: u64          = 0x044;
+const VIRTIO_MMIO_QUEUE_NOTIFY: u64         = 0x050;
+const VIRTIO_MMIO_STATUS: u64               = 0x070;
+const VIRTIO_MMIO_QUEUE_DESC_LOW: u64       = 0x080;
+const VIRTIO_MMIO_QUEUE_DESC_HIGH: u64      = 0x084;
+const VIRTIO_MMIO_QUEUE_AVAIL_LOW: u64      = 0x090;
+const VIRTIO_MMIO_QUEUE_AVAIL_HIGH: u64     = 0x094;
+const VIRTIO_MMIO_QUEUE_USED_LOW: u64       = 0x0a0;
+const VIRTIO_MMIO_QUEUE_USED_HIGH: u64      = 0x0a4;
+const VIRTIO_MMIO_CONFIG_GENERATION: u64    = 0x0fc;
+const VIRTIO_MMIO_CONFIG: u64               = 0x100;
 
 /* Taken from include/uapi/linux/virtio_blk.h */
 const VIRTIO_BLK_F_SIZE_MAX: u32 =	1;	/* Indicates maximum segment size */
@@ -51,11 +61,39 @@ const VIRTIO_CONFIG_S_NEEDS_RESET: u32 =    0x40;
 /* We've given up on this device. */
 const VIRTIO_CONFIG_S_FAILED: u32 =         0x80;
 
+pub fn print_status(status: u32) {
+    if status & VIRTIO_CONFIG_S_ACKNOWLEDGE != 0 {
+        println!("Linux has seen the device and processed generic fields.");
+    }
+    if status & VIRTIO_CONFIG_S_DRIVER != 0 {
+        println!("Kernel found a driver for the device.")
+    }
+    if status & VIRTIO_CONFIG_S_DRIVER_OK != 0 {
+        println!("Driver has used its parts of the config, and is happy.");
+    }
+    if status & VIRTIO_CONFIG_S_FEATURES_OK != 0 {
+        println!("Driver has finished configuring features.")
+    }
+    if status & VIRTIO_CONFIG_S_NEEDS_RESET != 0 {
+        println!("Device entered invalid state, driver must reset it.");
+    }
+    if status & VIRTIO_CONFIG_S_FAILED != 0 {
+        println!("Linux has given up on the device.");
+    }
+}
+
 pub struct VirtioBlk {
     dev_feat_sel: u32,
     drv_feat_sel: u32,
-    status: u32
+    status: u32,
+    curr_queue: u32,
+    desc: u64,
+    avail: u64,
+    used: u64,
+    queue_ready: u32,
+    queue_num: u32
 }
+const VIRTIO_MMIO_CONFIG_MAX: u64 = VIRTIO_MMIO_CONFIG + 4;
 
 impl MMIODevice for VirtioBlk {
     fn handle(&mut self, mmio: &mut MMIO) -> io::Result<()> {
@@ -66,16 +104,26 @@ impl MMIODevice for VirtioBlk {
                 let magic = read_le32(&[ 'v', 'i', 'r', 't' ].map(|c| c as u8), 0x0);
                 write_le32(&mut mmio.data, 0, magic);
             },
-            (true, VIRTIO_MMIO_VERSION) => write_le32(&mut mmio.data, 0, VIRTIO_VERSION),
-            (true, VIRTIO_MMIO_DEVICE_ID) => write_le32(&mut mmio.data, 0, VIRTIO_ID_BLOCK),
-            (true, VIRTIO_MMIO_VENDOR_ID) => write_le32(&mut mmio.data, 0, VIRTIO_VENDOR_NONE),
+            (true, VIRTIO_MMIO_VERSION) => {
+                write_le32(&mut mmio.data, 0, VIRTIO_VERSION);
+            },
+            (true, VIRTIO_MMIO_DEVICE_ID) => {
+                write_le32(&mut mmio.data, 0, VIRTIO_ID_BLOCK);
+            },
+            (true, VIRTIO_MMIO_VENDOR_ID) => {
+                write_le32(&mut mmio.data, 0, VIRTIO_VENDOR_NONE);
+            },
             (true, VIRTIO_MMIO_DEVICE_FEATURES) => {
                 let features: u32 = match self.dev_feat_sel {
-                    0 => 0x0, //(1 << VIRTIO_BLK_F_RO),
+                    0 => 1 << VIRTIO_BLK_F_RO,
                     1 => 1 << (VIRTIO_F_VERSION_1 - 32),
                     _ => 0x0
                 };
                 write_le32(&mut mmio.data, 0, features);
+            },
+            (false, VIRTIO_MMIO_DEVICE_FEATURES) => {
+                let features = read_le32(&mut mmio.data, 0);
+                /* leave it like this for now */
             },
             (false, VIRTIO_MMIO_DEVICE_FEATURES_SEL) => {
                 self.dev_feat_sel = read_le32(&mut mmio.data, 0);
@@ -88,26 +136,93 @@ impl MMIODevice for VirtioBlk {
                 };
                 write_le32(&mut mmio.data, 0, features);
             },
+            (false, VIRTIO_MMIO_DRIVER_FEATURES) => {
+                let features = read_le32(&mut mmio.data, 0);
+                /* also todo... */
+            },
             (false, VIRTIO_MMIO_DRIVER_FEATURES_SEL) => {
                 self.drv_feat_sel = read_le32(&mut mmio.data, 0);
+                /* also leave it like this for now */
             },
-            (true, 0x6f) => {
+            (false, VIRTIO_MMIO_QUEUE_SEL) => {
+                self.curr_queue = read_le32(&mut mmio.data, 0);
+                println!("CURR QUEUE: {}", self.curr_queue);
+            },
+            (true, VIRTIO_MMIO_QUEUE_NUM_MAX) => {
+                write_le32(&mut mmio.data, 0, 128);
+            },
+            (false, VIRTIO_MMIO_QUEUE_NUM) => {
+                self.queue_num = read_le32(&mut mmio.data, 0);
+                println!("QUEUE NUM: {}\r", self.queue_num);
+            },
+            (false, VIRTIO_MMIO_QUEUE_READY) => {
+                self.queue_ready = read_le32(&mut mmio.data, 0);
+                println!("QUEUE READY: {:#x}\r", self.queue_ready);
+            },
+            (false, VIRTIO_MMIO_QUEUE_NOTIFY) => {
+                let queue_notify = read_le32(&mut mmio.data, 0);
+                println!("QUEUE NOTIFY: {:#x}\r", queue_notify);
+            },
+            (true, VIRTIO_MMIO_QUEUE_READY) => {
+                write_le32(&mut mmio.data, 0, self.queue_ready);
+            },
+            (true, VIRTIO_MMIO_STATUS) => {
                 write_le32(&mut mmio.data, 0, self.status);
             },
-            (false, 0x6f) => {
+            (false, VIRTIO_MMIO_STATUS) => {
                 self.status = read_le32(&mut mmio.data, 0);
             },
-            (_, _) => ()
+            (false, VIRTIO_MMIO_QUEUE_DESC_LOW) => {
+                self.desc = read_le32(&mut mmio.data, 0) as u64;
+            },
+            (false, VIRTIO_MMIO_QUEUE_DESC_HIGH) => {
+                self.desc |= (read_le32(&mut mmio.data, 0) as u64) << 32;
+            },
+            (false, VIRTIO_MMIO_QUEUE_AVAIL_LOW) => {
+                self.avail = read_le32(&mut mmio.data, 0) as u64;
+            },
+            (false, VIRTIO_MMIO_QUEUE_AVAIL_HIGH) => {
+                self.avail |= (read_le32(&mut mmio.data, 0) as u64) << 32;
+            },
+            (false, VIRTIO_MMIO_QUEUE_USED_LOW) => {
+                self.used = read_le32(&mut mmio.data, 0) as u64;
+            },
+            (false, VIRTIO_MMIO_QUEUE_USED_HIGH) => {
+                self.used |= (read_le32(&mut mmio.data, 0) as u64) << 32;
+            },
+            (true, VIRTIO_MMIO_CONFIG_GENERATION) => {
+                write_le32(&mut mmio.data, 0, 0x0);
+            },
+            (true, VIRTIO_MMIO_CONFIG..=VIRTIO_MMIO_CONFIG_MAX) => {
+                match addr - VIRTIO_MMIO_CONFIG {
+                    /* capacity is measured in 512 bytes */
+                    0x0 => write_le32(&mut mmio.data, 0, 0x2), /* capacity low */
+                    0x4 => write_le32(&mut mmio.data, 0, 0x0), /* capacity high */
+                    _   => println!("Unknown config at {:#x}", addr)
+                };
+            },
+            (_, _) => {
+                println!("Got VIRTIO MMIO {} at {:#x}\r",
+                if mmio.is_write != 0 { "write" } else { "read" }, mmio.phys_addr);
+            }
         }
-        println!("Got VIRTIO MMIO {} at {:#x}",
-            if mmio.is_write != 0 { "write" } else { "read" }, mmio.phys_addr);
         Ok(())
     }
 }
 
 impl VirtioBlk {
     fn new() -> io::Result<Arc<Mutex<Self>>> {
-        Ok(Arc::new(Mutex::new(Self { dev_feat_sel: 0, drv_feat_sel: 0, status: 0 })))
+        Ok(Arc::new(Mutex::new(Self {
+            dev_feat_sel: 0,
+            drv_feat_sel: 0,
+            status: 0,
+            curr_queue: 0,
+            desc: 0,
+            avail: 0,
+            used: 0,
+            queue_ready: 0,
+            queue_num: 0
+        })))
     }
 }
 

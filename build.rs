@@ -23,6 +23,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .write_to_file(out_path.join("kvm-bindings.rs"))?;
 
             bindgen::Builder::default()
+                .header("/usr/include/linux/virtio_blk.h")
+                .allowlist_type("virtio_blk_config")
+                .generate_comments(false)
+                .generate()?
+                .write_to_file(out_path.join("virtio-blk-bindings.rs"))?;
+
+            bindgen::Builder::default()
                 .header("/usr/include/x86_64-linux-gnu/asm/bootparam.h")
                 .allowlist_type("boot_params")
                 .blocklist_type("__u8")
