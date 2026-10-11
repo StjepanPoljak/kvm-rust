@@ -1,5 +1,5 @@
 use std::io::{ self };
-use crate::{ VM, MMIO, MMIODevice, KVMIO, MAIN_TID, TTY, start_tty };
+use crate::{ VM, MMIO, MMIODevice, GuestMemory, KVMIO, MAIN_TID, TTY, start_tty };
 use crate::{ write_le32, read_le32 };
 use std::collections::HashMap;
 use libc::_IOW;
@@ -52,7 +52,7 @@ pub fn arch_update_irq(level: u32, vm_fd: libc::c_int) -> io::Result<()> {
 
 impl MMIODevice for UART {
 
-    fn handle(&mut self, mmio: &mut MMIO) -> io::Result<()> {
+    fn handle(&mut self, mmio: &mut MMIO, _mem: &GuestMemory) -> io::Result<()> {
         let mmio_reg = mmio.phys_addr & 0xfff;
         if (mmio.is_write != 0) && mmio_reg == 0x0 {
             /* we take only first u8 element of data */
@@ -139,8 +139,8 @@ impl VM {
 
     pub fn arch_handle_mmio(&mut self, mmio: &mut MMIO) -> io::Result<()> {
         let page = mmio.phys_addr >> 12;
-        if let Some(device) = self.mmio_devices.get_mut(&page) {
-            device.lock().unwrap().handle(mmio)?;
+        if let Some(device) = self.mmio_devices.get(&page) {
+            device.lock().unwrap().handle(mmio, &self.guest_memory)?;
         }
 
         Ok(())

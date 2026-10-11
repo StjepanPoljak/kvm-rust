@@ -20,9 +20,10 @@ type MMIO = kvm_run__bindgen_ty_1__bindgen_ty_6;
 type IO = kvm_run__bindgen_ty_1__bindgen_ty_4;
 type MMIODevices = HashMap::<u64, Arc<Mutex<dyn MMIODevice>>>;
 type IODevices = HashMap::<u64, Arc<Mutex<dyn IODevice>>>;
+type GuestMemory = Vec<MemRegion>;
 
 trait MMIODevice {
-    fn handle(&mut self, mmio: &mut MMIO) -> io::Result<()>;
+    fn handle(&mut self, mmio: &mut MMIO, mem: &GuestMemory) -> io::Result<()>;
 }
 
 trait IODevice {
@@ -110,7 +111,11 @@ impl KvmDev {
             return Err(io::Error::last_os_error());
         }
 
-        Ok(VM { fd: vm_fd, mem_regions: Vec::<MemRegion>::new(), mmio_devices: MMIODevices::new(), io_devices: IODevices::new() })
+        Ok(VM {
+            fd: vm_fd,
+            guest_memory: GuestMemory::new(),
+            mmio_devices: MMIODevices::new(),
+            io_devices: IODevices::new() })
     }
 
     fn fd(&self) -> libc::c_int {
@@ -124,13 +129,9 @@ impl KvmDev {
 
 pub struct VM {
     pub fd: libc::c_int,
-    pub mem_regions: Vec<MemRegion>,
+    pub guest_memory: GuestMemory,
     pub mmio_devices: MMIODevices,
     pub io_devices: IODevices
-}
-
-pub struct GuestMemory {
-    pub mem_regions: Vec<MemRegion>
 }
 
 pub struct MemRegion {
@@ -143,6 +144,14 @@ impl Drop for MemRegion {
     fn drop(&mut self) {
         unsafe { libc::munmap(self.mem_ptr, self.mem_size); }
     }
+}
+
+/* Translates a guest physical address to a host pointer, if [gpa, gpa + len) fits in one region. */
+fn gpa_to_host(mem: &GuestMemory, gpa: u64, len: usize) -> Option<*mut u8> {
+    mem.iter().find_map(|r| {
+        let off = usize::try_from(gpa.checked_sub(r.guest_phys_addr)?).ok()?;
+        (off.checked_add(len)? <= r.mem_size).then(|| unsafe { (r.mem_ptr as *mut u8).add(off) })
+    })
 }
 
 impl VM {
@@ -173,7 +182,7 @@ impl VM {
 
         // 140900 ioctl(9<anon_inode:kvm-vm>, 0x4020ae46 /* KVM_SET_USER_MEMORY_REGION */, {slot=0, flags=0, guest_phys_addr=0, memory_size=1073741824, userspace_addr=0x7768b3e00000}) = 0
         let region = kvm_userspace_memory_region {
-            slot : self.mem_regions.len() as u32,
+            slot : self.guest_memory.len() as u32,
             flags : 0,
             guest_phys_addr : guest_phys_addr,
             memory_size : mem_size as u64,
@@ -185,13 +194,15 @@ impl VM {
             return Err(io::Error::last_os_error());
         }
 
-        self.mem_regions.push(MemRegion { mem_ptr, mem_size, guest_phys_addr });
+        self.guest_memory.push(MemRegion { mem_ptr, mem_size, guest_phys_addr });
 
-        Ok(self.mem_regions.len() - 1)
+        Ok(self.guest_memory.len() - 1)
     }
 
     fn load_data_to_memory(&self, mem_region_idx: usize, data: Vec<u8>, offset: u64) -> io::Result<usize> {
-        let mem_region = self.mem_regions.get(mem_region_idx).ok_or(io::Error::other("Index exceeds memory region vector."))?;
+        let mem_region = self.guest_memory
+            .get(mem_region_idx)
+            .ok_or(io::Error::other("Index exceeds memory region vector."))?;
 
         if (offset as usize) >= mem_region.mem_size {
             return Err(io::Error::other("Offset exceeds memory region."));
@@ -215,7 +226,7 @@ impl VM {
         let mut res = Vec::new();
         file.read_to_end(&mut res)?;
 
-        println!("Loading {:?} at {:#x}...\r", path, offset + self.mem_regions[mem_region_idx].guest_phys_addr);
+        println!("Loading {:?} at {:#x}...\r", path, offset + self.guest_memory[mem_region_idx].guest_phys_addr);
 
         self.load_data_to_memory(mem_region_idx, res, offset)
     }

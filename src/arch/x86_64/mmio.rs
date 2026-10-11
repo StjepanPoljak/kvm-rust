@@ -1,5 +1,5 @@
 use std::io::{self};
-use crate::{ VM, MMIO, MMIODevice };
+use crate::{ VM, MMIO, MMIODevice, GuestMemory };
 use crate::{ read_le32, write_le32, read_le64, write_le64 };
 use std::sync::{ Arc, Mutex };
 
@@ -96,7 +96,7 @@ pub struct VirtioBlk {
 const VIRTIO_MMIO_CONFIG_MAX: u64 = VIRTIO_MMIO_CONFIG + 4;
 
 impl MMIODevice for VirtioBlk {
-    fn handle(&mut self, mmio: &mut MMIO) -> io::Result<()> {
+    fn handle(&mut self, mmio: &mut MMIO, _mem: &GuestMemory) -> io::Result<()> {
         let addr = mmio.phys_addr & 0xfff;
         let read = mmio.is_write == 0;
         match (read, addr) {
@@ -235,8 +235,8 @@ impl VM {
 
     pub fn arch_handle_mmio(&mut self, mmio: &mut MMIO) -> io::Result<()> {
         let page = mmio.phys_addr >> 12;
-        if let Some(device) = self.mmio_devices.get_mut(&page) {
-            device.lock().unwrap().handle(mmio)?;
+        if let Some(device) = self.mmio_devices.get(&page) {
+            device.lock().unwrap().handle(mmio, &self.guest_memory)?;
         }
         Ok(())
     }
