@@ -1,20 +1,16 @@
 use std::io::{ self };
-use crate::{ VM, MMIO, MMIODevice, GuestMemory, KVMIO, MAIN_TID, TTY, start_tty };
+use crate::{ VM, MMIO, MMIODevice, GuestMemory, KVMIO, TTY, start_tty, kvm_irq_level };
 use crate::{ write_le32, read_le32 };
 use std::collections::HashMap;
 use libc::_IOW;
-use std::time::Duration;
-use std::thread;
 use std::sync::{ Arc, Mutex, LazyLock };
-use std::io::{ stdin, stdout, Read, Write };
-use termion::raw::IntoRawMode;
-
-include!(concat!(env!("OUT_DIR"), "/kvm-bindings.rs"));
+use std::io::Write;
 
 const KVM_IRQ_LINE: libc::Ioctl = _IOW::<kvm_irq_level>(KVMIO, 0x61);
 
 pub struct UART {
     rx: Option<u8>,
+    #[allow(dead_code)]
     fr: u32, // 0x18
     cr: u32,   // 0x30
     imsc: u32,   // 0x38
@@ -39,7 +35,7 @@ pub fn arch_update_irq(level: u32, vm_fd: libc::c_int) -> io::Result<()> {
     irq.level = level;
     irq.__bindgen_anon_1.irq = 0x1000021;
 
-    let mut ret = unsafe {
+    let ret = unsafe {
         libc::ioctl(vm_fd, KVM_IRQ_LINE, &mut irq)
     };
 
@@ -59,7 +55,6 @@ impl MMIODevice for UART {
             print!("{}", mmio.data[0] as char);
             io::stdout().flush()?;
         } else if mmio.is_write == 0 {
-            let resp = Vec::<u8>::new();
             write_le32(&mut mmio.data, 0, self.pl011_response((mmio_reg) as u32)?);
         } else if mmio.is_write != 0 {
             let val = read_le32(&mmio.data, 0);

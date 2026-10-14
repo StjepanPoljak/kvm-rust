@@ -1,5 +1,5 @@
-use std::io::{ self, Read };
-use libc::{ _IOW, _IO, _IOR };
+use std::io;
+use libc::{ _IOW, _IOR };
 
 use crate::{kvm_regs, kvm_sregs2, kvm_dtable, kvm_segment};
 use crate::KVMIO;
@@ -181,8 +181,6 @@ impl VCPU {
 
         sregs2.cr0 = 0x1; // PE (Protected Mode) bit enabled
         sregs2.cr4 = 0x0; // all bits cleared as per PVH protocol
-        self.set_sregs2(sregs2);
-
-        Ok(())
+        self.set_sregs2(sregs2)
     }
 }

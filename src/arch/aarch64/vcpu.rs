@@ -1,8 +1,8 @@
-use std::io::{self, Read};
+use std::io;
 use std::collections::HashMap;
 use std::sync::LazyLock;
 use crate::{ kvm_vcpu_init, kvm_one_reg };
-use libc::{ _IOW, _IO, _IOR, _IOWR };
+use libc::_IOW;
 
 use crate::KVMIO;
 use crate::VCPU;

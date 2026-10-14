@@ -1,8 +1,8 @@
 use std::io::{ self };
 use termion::raw::IntoRawMode;
-use std::io::{ stdin, stdout, Read, Write };
+use std::io::{ stdin, stdout, Read };
 use crate::{ MAIN_TID };
-use std::sync::atomic::{ Ordering, AtomicU64 };
+use std::sync::atomic::Ordering;
 use std::sync::{ Arc, Mutex };
 
 pub trait TTY: Send {

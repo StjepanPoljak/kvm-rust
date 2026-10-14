@@ -1,8 +1,7 @@
 use libc::{ _IOWR,_IOW };
 use crate::{ KvmDev, VCPU, VM, Args };
 use crate::{ read_le32, read_le64 };
-use crate::mmap_mem_region;
-use crate::{ kvm_vcpu_init, kvm_one_reg, kvm_create_device, kvm_device_attr };
+use crate::{ kvm_create_device, kvm_device_attr };
 
 use std::fs::{File};
 use std::io::{self, Read};
@@ -14,16 +13,18 @@ const KVM_SET_DEVICE_ATTR: libc::Ioctl = _IOW::<kvm_device_attr>(KVMIO, 0xe1);
 
 const KVM_ARM_DEVICE_VGIC_V2: u32 = 0x5;
 const KVM_VGIC_V2_ADDR_TYPE_DIST: u64 = 0x0;
+#[allow(dead_code)]
 const KVM_VGIC_V2_DIST_SIZE: usize = 0x1000;
+#[allow(dead_code)]
 const KVM_VGIC_V2_CPU_SIZE: usize = 0x2000;
 const KVM_VGIC_V2_ADDR_TYPE_CPU: u64 = 0x1;
 const KVM_DEV_ARM_VGIC_GRP_ADDR: u32 = 0x0;
 
-pub fn arch_pre_vcpu_init(kvm_dev: &KvmDev, vm: &mut VM) -> io::Result<()> {
+pub fn arch_pre_vcpu_init(_kvm_dev: &KvmDev, _vm: &mut VM) -> io::Result<()> {
     Ok(())
 }
 
-pub fn arch_init(kvm_dev: &KvmDev, vm: &mut VM, vcpu: &mut VCPU) -> io::Result<()> {
+pub fn arch_init(_kvm_dev: &KvmDev, vm: &mut VM, vcpu: &mut VCPU) -> io::Result<()> {
     vcpu.arm_vcpu_init()?;
     vm.setup_irq_device()
 }
@@ -95,8 +96,6 @@ impl VM {
         }
 
         let mut dev_attr2 : kvm_device_attr = unsafe { std::mem::zeroed() };
-
-        dev_attr2 = unsafe { std::mem::zeroed() };
         dev_attr2.group = KVM_DEV_ARM_VGIC_GRP_ADDR;
         dev_attr2.attr = KVM_VGIC_V2_ADDR_TYPE_CPU;
         dev_attr2.flags = 0;
@@ -113,8 +112,9 @@ impl VM {
 
     }
     pub fn arch_load_linux(&mut self, vcpu: &mut VCPU, args: &Args) -> io::Result<()> {
-        let header = get_linux_header(&args.binary)?;
-        let file_len = std::fs::metadata("Image")?.len() as usize;
+        let linux_path = args.linux.as_ref().ok_or(io::Error::other("No Linux image specified."))?;
+        let header = get_linux_header(linux_path)?;
+        let file_len = std::fs::metadata(linux_path)?.len() as usize;
 
         println!("magic {:#x}, image_size: {}, file_size: {}, text_offset: {:#x}\r", header.magic, header.image_size, file_len, header.text_offset);
         let linux_mem_idx = self.add_mem_region(1024 * 1024 * 1024, LOAD_ADDR)?;
@@ -129,7 +129,7 @@ impl VM {
             None => ()
         }
 
-        self.load_file_to_memory(linux_mem_idx, &args.binary, KERN_OFFS)?;
+        self.load_file_to_memory(linux_mem_idx, linux_path, KERN_OFFS)?;
 
         vcpu.set_one_reg("x0", LOAD_ADDR)?;
         vcpu.set_one_reg("x1", 0x0)?;

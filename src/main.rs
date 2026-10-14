@@ -1,4 +1,8 @@
-include!(concat!(env!("OUT_DIR"), "/kvm-bindings.rs"));
+#[allow(non_camel_case_types, non_upper_case_globals, non_snake_case, dead_code)]
+mod kvm_bindings {
+    include!(concat!(env!("OUT_DIR"), "/kvm-bindings.rs"));
+}
+use kvm_bindings::*;
 
 include!("frontend/mod.rs");
 include!("util/mod.rs");
@@ -9,12 +13,10 @@ use std::os::unix::io::AsRawFd;
 use clap::Parser;
 use std::fs::File;
 use std::io::{self, Read};
-use libc::{_IOW, _IO, _IOR};
+use libc::{_IOW, _IO};
 use std::collections::HashMap;
 use std::sync::{Arc,Mutex};
 use std::sync::atomic::{AtomicBool, Ordering, AtomicU64};
-use std::io::Write;
-use crate::load_elf;
 
 type MMIO = kvm_run__bindgen_ty_1__bindgen_ty_6;
 type IO = kvm_run__bindgen_ty_1__bindgen_ty_4;
@@ -22,11 +24,11 @@ type MMIODevices = HashMap::<u64, Arc<Mutex<dyn MMIODevice>>>;
 type IODevices = HashMap::<u64, Arc<Mutex<dyn IODevice>>>;
 type GuestMemory = Vec<MemRegion>;
 
-trait MMIODevice {
+pub trait MMIODevice {
     fn handle(&mut self, mmio: &mut MMIO, mem: &GuestMemory) -> io::Result<()>;
 }
 
-trait IODevice {
+pub trait IODevice {
     fn handle(&mut self, io: &IO, base: *mut u8) -> io::Result<()>;
 }
 
@@ -49,14 +51,18 @@ const KVM_EXIT_SHUTDOWN: u32 = 8;
 const KVM_EXIT_FAIL_ENTRY: u32 = 9;
 const KVM_EXIT_INTERNAL_ERROR: u32 = 17;
 
+#[allow(dead_code)]
 const KVM_INTERNAL_ERROR_EMULATION: u32 = 1;
+#[allow(dead_code)]
 const KVM_INTERNAL_ERROR_SIMUL_EX: u32 = 2;
+#[allow(dead_code)]
 const KVM_INTERNAL_ERROR_DELIVERY_EV: u32 = 3;
+#[allow(dead_code)]
 const KVM_INTERNAL_ERROR_UNEXPECTED_EXIT_REASON: u32 = 4;
 
 #[derive(Parser, Debug)]
 #[command(version, about)]
-struct Args {
+pub struct Args {
     /// Binary to run
     #[arg(short, long)]
     binary: Option<String>,
@@ -146,6 +152,7 @@ impl Drop for MemRegion {
     }
 }
 
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 fn gpa_to_host(mem: &GuestMemory, gpa: u64, len: usize) -> Option<*mut u8> {
     mem.iter().find_map(|r| {
         let off = usize::try_from(gpa.checked_sub(r.guest_phys_addr)?).ok()?;
@@ -153,6 +160,7 @@ fn gpa_to_host(mem: &GuestMemory, gpa: u64, len: usize) -> Option<*mut u8> {
     })
 }
 
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 fn read_guest_ptr<T>(ptr: *const u8) -> T {
     unsafe {
         std::ptr::read_volatile(ptr.cast::<T>())
@@ -309,7 +317,7 @@ fn main() -> io::Result<()> {
     let kvm_dev = KvmDev::new()?;
     let mut vm = kvm_dev.create_vm()?;
 
-    arch::arch_pre_vcpu_init(&kvm_dev, &mut vm);
+    arch::arch_pre_vcpu_init(&kvm_dev, &mut vm)?;
 
     let mut vcpu = vm.create_vcpu()?;
 
@@ -351,7 +359,7 @@ fn main() -> io::Result<()> {
         match exit_reason {
             KVM_EXIT_IO => {
                 let io = unsafe { (*run).__bindgen_anon_1.io };
-                vm.handle_io(&io, vcpu.kvm_run_mem as *mut u8);
+                vm.handle_io(&io, vcpu.kvm_run_mem as *mut u8)?;
             }
             KVM_EXIT_SHUTDOWN => {
                 println!("Guest shutdown.");

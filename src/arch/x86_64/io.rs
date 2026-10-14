@@ -1,16 +1,11 @@
 use std::io::{ self, Write };
-use crate::{ VM, IO, IODevice, MAIN_TID, KVMIO, TTY, start_tty };
+use crate::{ VM, IO, IODevice, KVMIO, TTY, start_tty, kvm_irq_level };
 use std::sync::{ Arc, Mutex };
 use libc::_IOW;
-use std::sync::atomic::{ Ordering, AtomicU64 };
-use std::io::{ stdin, stdout, Read };
-use termion::raw::IntoRawMode;
 use std::collections::VecDeque;
 
 const KVM_EXIT_IO_OUT: u8 = 1;
 const KVM_EXIT_IO_IN: u8 = 0;
-
-include!(concat!(env!("OUT_DIR"), "/kvm-bindings.rs"));
 
 const KVM_IRQ_LINE: libc::Ioctl = _IOW::<kvm_irq_level>(KVMIO, 0x61);
 
@@ -19,7 +14,7 @@ pub fn arch_update_irq(level: u32, vm_fd: libc::c_int) -> io::Result<()> {
     irq.level = level;
     irq.__bindgen_anon_1.irq = 0x4;
 
-    let mut ret = unsafe {
+    let ret = unsafe {
         libc::ioctl(vm_fd, KVM_IRQ_LINE, &mut irq)
     };
 
@@ -35,7 +30,9 @@ pub struct UART {
     fcr: u8, /* 0x3fa */
     lcr: u8, /* 0x3fb */
     mcr: u8, /* 0x3fc */
+    #[allow(dead_code)]
     lsr: u8, /* 0x3fd */
+    #[allow(dead_code)]
     msr: u8, /* 0x3fe */
     scr: u8, /* 0x3ff */
     thr_ipending: bool,
@@ -47,21 +44,22 @@ pub struct UART {
 impl TTY for UART {
     fn send_char(&mut self, ch: u8) -> io::Result<()> {
         self.rx.push_back(ch);
-        self.update_irq();
-        Ok(())
+        self.update_irq()
     }
 }
 
 impl UART {
-    fn update_irq(&mut self) {
+    fn update_irq(&mut self) -> io::Result<()> {
         let level = self.mcr & 0x08 != 0
             && ((self.ier & 0x01 != 0 && !self.rx.is_empty())
             || (self.ier & 0x02 != 0 && self.thr_ipending));
 
         if level != self.irq_level {
             self.irq_level = level;
-            arch_update_irq(if level { 1 } else { 0 } as u32, self.vm_fd);
+            arch_update_irq(if level { 1 } else { 0 } as u32, self.vm_fd)?;
         }
+
+        Ok(())
     }
 
     fn new(vm_fd: libc::c_int) -> io::Result<Arc<Mutex<Self>>> {
@@ -127,28 +125,27 @@ impl IODevice for UART {
             (_, _) => data[0] = 0xff
         };
 
-        self.update_irq();
-        Ok(())
+        self.update_irq()
     }
 }
 
 #[repr(u64)]
 pub enum DeviceId {
-    DEVICE_UART = 0u64,
-    DEVICE_UNKNOWN = !(0u64)
+    Uart = 0u64,
+    Unknown = !(0u64)
 }
 
 impl VM {
     pub fn arch_init_io_devices(&mut self) -> io::Result<()> {
         let uart = UART::new(self.fd)?;
-        self.io_devices.insert(DeviceId::DEVICE_UART as u64, uart.clone() as Arc<Mutex<dyn IODevice>>);
+        self.io_devices.insert(DeviceId::Uart as u64, uart.clone() as Arc<Mutex<dyn IODevice>>);
         Ok(())
     }
 
     pub fn arch_handle_io(&mut self, io: &IO, base: *mut u8) -> io::Result<()> {
         let dev: DeviceId = match io.port {
-            0x3f8..=0x3ff => DeviceId::DEVICE_UART,
-            _ => DeviceId::DEVICE_UNKNOWN
+            0x3f8..=0x3ff => DeviceId::Uart,
+            _ => DeviceId::Unknown
         };
         if let Some(device) = self.io_devices.get_mut(&(dev as u64)) {
             device.lock().unwrap().handle(io, base)?;

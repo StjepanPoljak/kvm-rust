@@ -1,12 +1,15 @@
 use std::io::{self};
 use crate::{ VM, MMIO, MMIODevice, GuestMemory };
-use crate::{ read_le32, write_le32, read_le64, write_le64, gpa_to_host, read_guest_ptr };
+use crate::{ read_le32, write_le32, gpa_to_host, read_guest_ptr };
 use std::sync::{ Arc, Mutex };
 use std::sync::atomic::{ Ordering, fence };
-use std::ptr::read_volatile;
 
-include!(concat!(env!("OUT_DIR"), "/virtio-blk-bindings.rs"));
-include!(concat!(env!("OUT_DIR"), "/virtio-ring-bindings.rs"));
+#[allow(non_camel_case_types, non_upper_case_globals, non_snake_case, dead_code)]
+mod virtio_bindings {
+    include!(concat!(env!("OUT_DIR"), "/virtio-blk-bindings.rs"));
+    include!(concat!(env!("OUT_DIR"), "/virtio-ring-bindings.rs"));
+}
+use virtio_bindings::*;
 
 const VIRTIO_VERSION: u32 = 0x2;
 const VIRTIO_ID_BLOCK: u32 = 0x2;
@@ -36,16 +39,26 @@ const VIRTIO_MMIO_CONFIG_GENERATION: u64    = 0x0fc;
 const VIRTIO_MMIO_CONFIG: u64               = 0x100;
 
 /* Taken from include/uapi/linux/virtio_blk.h */
+#[allow(dead_code)]
 const VIRTIO_BLK_F_SIZE_MAX: u32 =      1; /* Indicates maximum segment size */
+#[allow(dead_code)]
 const VIRTIO_BLK_F_SEG_MAX: u32 =       2; /* Indicates maximum # of segments */
+#[allow(dead_code)]
 const VIRTIO_BLK_F_GEOMETRY: u32 =      4; /* Legacy geometry available  */
 const VIRTIO_BLK_F_RO: u32 =            5; /* Disk is read-only */
+#[allow(dead_code)]
 const VIRTIO_BLK_F_BLK_SIZE: u32 =      6; /* Block size of disk is available*/
+#[allow(dead_code)]
 const VIRTIO_BLK_F_TOPOLOGY: u32 =      10; /* Topology information is available */
+#[allow(dead_code)]
 const VIRTIO_BLK_F_MQ: u32 =            12; /* support more than one vq */
+#[allow(dead_code)]
 const VIRTIO_BLK_F_DISCARD: u32 =       13; /* DISCARD is supported */
+#[allow(dead_code)]
 const VIRTIO_BLK_F_WRITE_ZEROES: u32 =  14; /* WRITE ZEROES is supported */
+#[allow(dead_code)]
 const VIRTIO_BLK_F_SECURE_ERASE: u32 =  16;     /* Secure Erase is supported */
+#[allow(dead_code)]
 const VIRTIO_BLK_F_ZONED: u32 =         17; /* Zoned block device */
 
 const VIRTIO_F_VERSION_1: u32 =         32;
@@ -69,11 +82,13 @@ const VRING_DESC_F_NEXT: u16 =          1;
 /* This marks a buffer as write-only (otherwise read-only). */
 const VRING_DESC_F_WRITE: u16 =         2;
 /* This means the buffer contains a list of buffer descriptors. */
+#[allow(dead_code)]
 const VRING_DESC_F_INDIRECT: u16 =      4;
 
 /* The Host uses this in used->flags to advise the Guest: don't kick me when
  * you add a buffer.  It's unreliable, so it's simply an optimization.  Guest
  * will still kick if it's out of buffers. */
+#[allow(dead_code)]
 const VRING_USED_F_NO_NOTIFY: u16 =     1;
 /* The Guest uses this in avail->flags to advise the Host: don't interrupt me
  * when you consume a buffer.  It's unreliable, so it's simply an
@@ -99,6 +114,7 @@ impl vring_desc {
         }
     }
 
+    #[allow(dead_code)]
     fn is_indirect(&self) -> bool {
         self.flags & VRING_DESC_F_INDIRECT != 0
     }
@@ -119,11 +135,13 @@ fn new_from<T>(bytes: &[u8], o: usize) -> Option<T> {
 }
 
 impl virtio_blk_outhdr {
+    #[allow(dead_code)]
     fn new_from(bytes: &[u8], o: usize) -> Self {
         new_from(bytes, o).unwrap()
     }
 }
 
+#[allow(dead_code)]
 pub fn print_status(status: u32) {
     if status & VIRTIO_CONFIG_S_ACKNOWLEDGE != 0 {
         println!("Linux has seen the device and processed generic fields.");
@@ -200,7 +218,7 @@ impl MMIODevice for VirtioBlk {
                 write_le32(&mut mmio.data, 0, features);
             },
             (false, VIRTIO_MMIO_DEVICE_FEATURES) => {
-                let features = read_le32(&mut mmio.data, 0);
+                let _features = read_le32(&mut mmio.data, 0);
                 /* leave it like this for now */
             },
             (false, VIRTIO_MMIO_DEVICE_FEATURES_SEL) => {
@@ -215,7 +233,7 @@ impl MMIODevice for VirtioBlk {
                 write_le32(&mut mmio.data, 0, features);
             },
             (false, VIRTIO_MMIO_DRIVER_FEATURES) => {
-                let features = read_le32(&mut mmio.data, 0);
+                let _features = read_le32(&mut mmio.data, 0);
                 /* also todo... */
             },
             (false, VIRTIO_MMIO_DRIVER_FEATURES_SEL) => {

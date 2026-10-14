@@ -1,12 +1,11 @@
-use crate::{ kvm_segment, kvm_cpuid2, kvm_cpuid_entry2, kvm_pit_config };
+use crate::{ kvm_cpuid2, kvm_cpuid_entry2, kvm_pit_config };
 use crate::{ VCPU, VM, KvmDev, Args, KVMIO };
 use crate::{ read_le64, read_le32, load_elf };
-use libc::{_IOW, _IO, _IOR, _IOWR};
+use libc::{_IOW, _IO, _IOWR};
 
-use object::elf;
 use object::read::elf::{ElfFile64, SectionHeader};
-use object::{Endianness, Object, ObjectSection};
-use std::io::{self, Read};
+use object::{Endianness, Object};
+use std::io;
 
 const KVM_CREATE_IRQCHIP: libc::Ioctl = _IO(KVMIO, 0x60);
 const KVM_CREATE_PIT2: libc::Ioctl = _IOW::<kvm_pit_config>(KVMIO, 0x77);
@@ -43,7 +42,7 @@ struct HvmMemmapEntry {
     reserved: u32
 }
 
-pub fn arch_pre_vcpu_init(kvm_dev: &KvmDev, vm: &mut VM) -> io::Result<()> {
+pub fn arch_pre_vcpu_init(_kvm_dev: &KvmDev, vm: &mut VM) -> io::Result<()> {
     let ret = unsafe { libc::ioctl(vm.fd, KVM_CREATE_IRQCHIP, 0x0) };
     if ret < 0 {
         return Err(io::Error::last_os_error());
@@ -59,8 +58,9 @@ pub fn arch_pre_vcpu_init(kvm_dev: &KvmDev, vm: &mut VM) -> io::Result<()> {
     Ok(())
 }
 
-pub fn arch_init(kvm_dev: &KvmDev, vm: &mut VM, vcpu: &mut VCPU) -> io::Result<()> {
-    let mut cpuid2 = vec![0u32; size_of::<kvm_cpuid2>() + 256 * size_of::<kvm_cpuid_entry2>()].as_mut_ptr() as *mut kvm_cpuid2;
+pub fn arch_init(kvm_dev: &KvmDev, _vm: &mut VM, vcpu: &mut VCPU) -> io::Result<()> {
+    let mut cpuid2_buf = vec![0u32; size_of::<kvm_cpuid2>() + 256 * size_of::<kvm_cpuid_entry2>()];
+    let cpuid2 = cpuid2_buf.as_mut_ptr() as *mut kvm_cpuid2;
     unsafe { (*cpuid2).nent = 256; }
 
     let ret = unsafe { libc::ioctl(kvm_dev.fd(), KVM_GET_SUPPORTED_CPUID, cpuid2) };
@@ -120,9 +120,9 @@ impl VM {
         let ram_size: u64 = 1024 * 1024 * 1024;
         let linux_mem_idx = self.add_mem_region(ram_size as usize, 0x0)?;
 
-        let last_addr = load_elf(self, &vmlinux, &vmlinux_data, linux_mem_idx);
+        let last_addr = load_elf(self, &vmlinux, &vmlinux_data, linux_mem_idx)?;
 
-        let mut cmdline = String::from("console=ttyS0,115200 root=/dev/vda virtio_mmio.device=4K@0xd0000000:5");
+        let cmdline = String::from("console=ttyS0,115200 root=/dev/vda virtio_mmio.device=4K@0xd0000000:5");
         let mut modlist_entries = vec![];
 
         let hvm_base: u64 = 0x10000;
@@ -131,7 +131,7 @@ impl VM {
             Some(initramfs_path) => {
                 let initrd_cmdline = "\0";
                 let initrd_cmdline_start = (last_addr + 0xfff) & !0xfff;
-                self.load_data_to_memory(linux_mem_idx, initrd_cmdline.as_bytes().to_vec(), initrd_cmdline_start);
+                self.load_data_to_memory(linux_mem_idx, initrd_cmdline.as_bytes().to_vec(), initrd_cmdline_start)?;
 
                 let initrd_start = ((initrd_cmdline.len() as u64) + initrd_cmdline_start + 0xfff) & !0xfff;
                 let initramfs_size = self.load_file_to_memory(linux_mem_idx, &initramfs_path, initrd_start).unwrap();
@@ -163,7 +163,7 @@ impl VM {
         let mut cmdline_start = hvm_base + std::mem::size_of::<HvmStartInfo>() as u64;
         cmdline_start = (cmdline_start + 0xfff) & !0xfff;
         let cmdline_size = cmdline.len() as u64;
-        self.load_data_to_memory(linux_mem_idx, cmdline.as_bytes().to_vec(), cmdline_start);
+        self.load_data_to_memory(linux_mem_idx, cmdline.as_bytes().to_vec(), cmdline_start)?;
 
         let mut memmap_start = cmdline_start + cmdline_size;
         memmap_start = (memmap_start + 0xfff) & !0xfff;
@@ -175,7 +175,7 @@ impl VM {
             memmap_buf.extend_from_slice(&e.type_.to_le_bytes());
             memmap_buf.extend_from_slice(&e.reserved.to_le_bytes());
         }
-        self.load_data_to_memory(linux_mem_idx, memmap_buf, memmap_start);
+        self.load_data_to_memory(linux_mem_idx, memmap_buf, memmap_start)?;
 
         let mut modlist_start = memmap_start + memmap_size as u64;
         modlist_start = (modlist_start + 0xfff) & !0xfff;
@@ -187,10 +187,10 @@ impl VM {
             modlist_buf.extend_from_slice(&e.cmdline_paddr.to_le_bytes());
             modlist_buf.extend_from_slice(&e.reserved.to_le_bytes());
         }
-        self.load_data_to_memory(linux_mem_idx, modlist_buf, modlist_start);
+        self.load_data_to_memory(linux_mem_idx, modlist_buf, modlist_start)?;
 
         let mut magic = [ 'x', 'E', 'n', '3' ].map(|c| c as u8); magic[1] |= 0x80;
-        let mut hvm_start_info = HvmStartInfo {
+        let hvm_start_info = HvmStartInfo {
             magic: read_le32(&magic, 0x0),
             version: 1u32,
             flags: 0u32,
@@ -206,16 +206,16 @@ impl VM {
             &hvm_start_info as *const HvmStartInfo as *const u8,
             std::mem::size_of::<HvmStartInfo>(),
         ) };
-        self.load_data_to_memory(linux_mem_idx, hvm_mem_src.to_vec(), hvm_base);
+        self.load_data_to_memory(linux_mem_idx, hvm_mem_src.to_vec(), hvm_base)?;
 
         let mut regs = vcpu.get_regs()?;
         regs.rip = pvh_entrypoint;
         regs.rbx = hvm_base;
         regs.rflags = 0x2; // bits 17, 9 and 8 cleared, all other unspecified
-        vcpu.set_regs(regs);
+        vcpu.set_regs(regs)?;
         regs.print();
 
-        vcpu.protected_mode_setup();
+        vcpu.protected_mode_setup()?;
 
         Ok(())
     }
