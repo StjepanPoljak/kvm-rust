@@ -35,30 +35,12 @@ pub trait IODevice {
 static SHOULD_STOP: AtomicBool = AtomicBool::new(false);
 static MAIN_TID: AtomicU64 = AtomicU64::new(0);
 
-pub const KVMIO: u32 = 0xae;
-
 const KVM_CREATE_VM: libc::Ioctl = _IO(KVMIO, 0x01);
 const KVM_CREATE_VCPU: libc::Ioctl = _IO(KVMIO, 0x41);
 const KVM_GET_VCPU_MMAP_SIZE: libc::Ioctl = _IO(KVMIO, 0x04);
 
 const KVM_SET_USER_MEMORY_REGION: libc::Ioctl = _IOW::<kvm_userspace_memory_region>(KVMIO, 0x46);
 const KVM_RUN: libc::Ioctl = _IO(KVMIO, 0x80);
-
-const KVM_EXIT_IO: u32 = 2;
-const KVM_EXIT_HLT: u32 = 5;
-const KVM_EXIT_MMIO: u32 = 6;
-const KVM_EXIT_SHUTDOWN: u32 = 8;
-const KVM_EXIT_FAIL_ENTRY: u32 = 9;
-const KVM_EXIT_INTERNAL_ERROR: u32 = 17;
-
-#[allow(dead_code)]
-const KVM_INTERNAL_ERROR_EMULATION: u32 = 1;
-#[allow(dead_code)]
-const KVM_INTERNAL_ERROR_SIMUL_EX: u32 = 2;
-#[allow(dead_code)]
-const KVM_INTERNAL_ERROR_DELIVERY_EV: u32 = 3;
-#[allow(dead_code)]
-const KVM_INTERNAL_ERROR_UNEXPECTED_EXIT_REASON: u32 = 4;
 
 #[derive(Parser, Debug)]
 #[command(version, about)]

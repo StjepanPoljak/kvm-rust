@@ -1,7 +1,8 @@
 use libc::{ _IOWR,_IOW };
 use crate::{ KvmDev, VCPU, VM, Args };
 use crate::{ read_le32, read_le64 };
-use crate::{ kvm_create_device, kvm_device_attr };
+use crate::{ kvm_create_device, kvm_device_attr, kvm_device_type };
+use crate::{ KVM_VGIC_V2_ADDR_TYPE_DIST, KVM_VGIC_V2_ADDR_TYPE_CPU, KVM_DEV_ARM_VGIC_GRP_ADDR };
 
 use std::fs::{File};
 use std::io::{self, Read};
@@ -10,15 +11,6 @@ use crate::KVMIO;
 
 const KVM_CREATE_DEVICE: libc::Ioctl = _IOWR::<kvm_create_device>(KVMIO, 0xe0);
 const KVM_SET_DEVICE_ATTR: libc::Ioctl = _IOW::<kvm_device_attr>(KVMIO, 0xe1);
-
-const KVM_ARM_DEVICE_VGIC_V2: u32 = 0x5;
-const KVM_VGIC_V2_ADDR_TYPE_DIST: u64 = 0x0;
-#[allow(dead_code)]
-const KVM_VGIC_V2_DIST_SIZE: usize = 0x1000;
-#[allow(dead_code)]
-const KVM_VGIC_V2_CPU_SIZE: usize = 0x2000;
-const KVM_VGIC_V2_ADDR_TYPE_CPU: u64 = 0x1;
-const KVM_DEV_ARM_VGIC_GRP_ADDR: u32 = 0x0;
 
 pub fn arch_pre_vcpu_init(_kvm_dev: &KvmDev, _vm: &mut VM) -> io::Result<()> {
     Ok(())
@@ -69,7 +61,7 @@ impl VM {
     pub fn setup_irq_device(&mut self) -> io::Result<()> {
         let mut create_device: kvm_create_device = unsafe { std::mem::zeroed() };
 
-        create_device.type_ = KVM_ARM_DEVICE_VGIC_V2;
+        create_device.type_ = kvm_device_type::KVM_DEV_TYPE_ARM_VGIC_V2;
         create_device.fd = 0xffffffff;
         create_device.flags = 0;
 
@@ -84,7 +76,7 @@ impl VM {
         let cpu_addr: u64 = 0x08_010_000;
         let mut dev_attr : kvm_device_attr = unsafe { std::mem::zeroed() };
         dev_attr.group = KVM_DEV_ARM_VGIC_GRP_ADDR;
-        dev_attr.attr = KVM_VGIC_V2_ADDR_TYPE_DIST;
+        dev_attr.attr = KVM_VGIC_V2_ADDR_TYPE_DIST as u64;
         dev_attr.flags = 0;
         dev_attr.addr = &dist_addr as *const u64 as u64;
 
@@ -97,7 +89,7 @@ impl VM {
 
         let mut dev_attr2 : kvm_device_attr = unsafe { std::mem::zeroed() };
         dev_attr2.group = KVM_DEV_ARM_VGIC_GRP_ADDR;
-        dev_attr2.attr = KVM_VGIC_V2_ADDR_TYPE_CPU;
+        dev_attr2.attr = KVM_VGIC_V2_ADDR_TYPE_CPU as u64;
         dev_attr2.flags = 0;
         dev_attr2.addr = &cpu_addr as *const u64 as u64;
 

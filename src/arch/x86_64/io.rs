@@ -1,11 +1,8 @@
 use std::io::{ self, Write };
-use crate::{ VM, IO, IODevice, KVMIO, TTY, start_tty, kvm_irq_level };
+use crate::{ VM, IO, IODevice, KVMIO, TTY, start_tty, kvm_irq_level, KVM_EXIT_IO_IN, KVM_EXIT_IO_OUT };
 use std::sync::{ Arc, Mutex };
 use libc::_IOW;
 use std::collections::VecDeque;
-
-const KVM_EXIT_IO_OUT: u8 = 1;
-const KVM_EXIT_IO_IN: u8 = 0;
 
 const KVM_IRQ_LINE: libc::Ioctl = _IOW::<kvm_irq_level>(KVMIO, 0x61);
 
@@ -73,7 +70,7 @@ impl UART {
 impl IODevice for UART {
     fn handle(&mut self, io: &IO, base: *mut u8) -> io::Result<()> {
         let port = io.port;
-        let direction = io.direction;
+        let direction = io.direction as u32;
         let size = io.size as usize;
         let count = io.count as usize;
         let offset = io.data_offset as usize;

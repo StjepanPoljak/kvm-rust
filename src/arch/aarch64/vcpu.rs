@@ -1,7 +1,7 @@
 use std::io;
 use std::collections::HashMap;
 use std::sync::LazyLock;
-use crate::{ kvm_vcpu_init, kvm_one_reg };
+use crate::{ kvm_vcpu_init, kvm_one_reg, KVM_REG_ARM64, KVM_REG_SIZE_U64, KVM_REG_ARM_CORE };
 use libc::_IOW;
 
 use crate::KVMIO;
@@ -11,13 +11,8 @@ const KVM_ARM_VCPU_INIT: libc::Ioctl = _IOW::<kvm_vcpu_init>(KVMIO, 0xae);
 const KVM_GET_ONE_REG: libc::Ioctl = _IOW::<kvm_one_reg>(KVMIO, 0xab);
 const KVM_SET_ONE_REG: libc::Ioctl = _IOW::<kvm_one_reg>(KVMIO, 0xac);
 
-const KVM_REG_ARM64: u64 = 0x6000000000000000;
-const KVM_REG_SIZE_U64: u64 = 0x0030000000000000;
-const KVM_REG_ARM_COPROC_SHIFT: u64 = 16;
-const KVM_REG_ARM_CORE: u64 = 0x0010 << KVM_REG_ARM_COPROC_SHIFT;
-
 fn aarch64_core_reg(name: &str) -> io::Result<u64> {
-    let base = KVM_REG_ARM64 | KVM_REG_SIZE_U64 | KVM_REG_ARM_CORE;
+    let base = KVM_REG_ARM64 | KVM_REG_SIZE_U64 | KVM_REG_ARM_CORE as u64;
     if name.starts_with("x") {
         let reg : u64 = name[1..]
             .parse()
