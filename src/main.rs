@@ -146,12 +146,17 @@ impl Drop for MemRegion {
     }
 }
 
-/* Translates a guest physical address to a host pointer, if [gpa, gpa + len) fits in one region. */
 fn gpa_to_host(mem: &GuestMemory, gpa: u64, len: usize) -> Option<*mut u8> {
     mem.iter().find_map(|r| {
         let off = usize::try_from(gpa.checked_sub(r.guest_phys_addr)?).ok()?;
         (off.checked_add(len)? <= r.mem_size).then(|| unsafe { (r.mem_ptr as *mut u8).add(off) })
     })
+}
+
+fn read_guest_ptr<T>(ptr: *const u8) -> T {
+    unsafe {
+        std::ptr::read_volatile(ptr.cast::<T>())
+    }
 }
 
 impl VM {

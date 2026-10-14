@@ -25,9 +25,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             bindgen::Builder::default()
                 .header("/usr/include/linux/virtio_blk.h")
                 .allowlist_type("virtio_blk_config")
+                .allowlist_type("virtio_blk_outhdr")
                 .generate_comments(false)
                 .generate()?
                 .write_to_file(out_path.join("virtio-blk-bindings.rs"))?;
+
+            bindgen::Builder::default()
+                .header("/usr/include/linux/virtio_ring.h")
+                .allowlist_type("vring_desc")
+                .allowlist_type("vring_avail")
+                .allowlist_type("vring_used")
+                .allowlist_type("vring_used_elem")
+                .blocklist_type("__u8")
+                .blocklist_type("__u16")
+                .blocklist_type("__u32")
+                .blocklist_type("__u64")
+                .blocklist_type("__virtio16")
+                .blocklist_type("__virtio32")
+                .blocklist_type("__virtio64")
+                .generate_comments(false)
+                .generate()?
+                .write_to_file(out_path.join("virtio-ring-bindings.rs"))?;
 
             bindgen::Builder::default()
                 .header("/usr/include/x86_64-linux-gnu/asm/bootparam.h")

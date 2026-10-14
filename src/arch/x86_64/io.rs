@@ -84,15 +84,14 @@ impl IODevice for UART {
         };
         match (direction, port) {
             (KVM_EXIT_IO_OUT, 0x3f8) => {
-            if data[0] == b'\n' {
-                io::stdout().write_all(b"\r").ok();
-            }
-                    io::stdout().write_all(&data[0..1]).ok();
-                    io::stdout().flush().ok();
-                    self.thr_ipending = true;
+                if data[0] == b'\n' {
+                    io::stdout().write_all(b"\r").ok();
+                }
+                io::stdout().write_all(&data[0..1]).ok();
+                io::stdout().flush().ok();
+                self.thr_ipending = true;
             },
             (KVM_EXIT_IO_IN, 0x3f8) => data[0] = self.rx.pop_front().unwrap_or(0),
-
             (KVM_EXIT_IO_IN, 0x3fd) => data[0] = if self.rx.is_empty() { 0x60 } else { 0x61 },
             (KVM_EXIT_IO_OUT, 0x3f9) => {
                 let v = data[0] & 0x0f;
@@ -100,22 +99,22 @@ impl IODevice for UART {
                     self.thr_ipending = true;
                 }
                 self.ier = v;
-            }
+            },
             (KVM_EXIT_IO_OUT, 0x3fa) => self.fcr = data[0] as u8,
             (KVM_EXIT_IO_OUT, 0x3fb) => self.lcr = data[0] as u8,
             (KVM_EXIT_IO_OUT, 0x3fc) => self.mcr = data[0] as u8,
             (KVM_EXIT_IO_IN, 0x3f9) => data[0] = self.ier,
             (KVM_EXIT_IO_IN, 0x3fa) => {
-                    let fifo = if self.fcr & 0x01 != 0 { 0xc0 } else { 0x00 };
-    data[0] = if self.ier & 0x01 != 0 && !self.rx.is_empty() {
-        fifo | 0x04
-    } else if self.ier & 0x02 != 0 && self.thr_ipending {
-        self.thr_ipending = false;
-        fifo | 0x02
-    } else {
-        fifo | 0x01
-    };
-    },
+                let fifo = if self.fcr & 0x01 != 0 { 0xc0 } else { 0x00 };
+                data[0] = if self.ier & 0x01 != 0 && !self.rx.is_empty() {
+                    fifo | 0x04
+                } else if self.ier & 0x02 != 0 && self.thr_ipending {
+                    self.thr_ipending = false;
+                    fifo | 0x02
+                } else {
+                    fifo | 0x01
+                };
+            },
             (KVM_EXIT_IO_IN, 0x3fe) => data[0] = if self.mcr & 0x10 != 0 {
                     ((self.mcr & 0x02) << 3) | ((self.mcr & 0x01) << 5)
                   | ((self.mcr & 0x04) << 4) | ((self.mcr & 0x08) << 4)
@@ -123,8 +122,8 @@ impl IODevice for UART {
             (KVM_EXIT_IO_IN, 0x3ff) => data[0] = self.scr,
             (KVM_EXIT_IO_OUT, 0x3ff) => self.scr = data[0],
             (KVM_EXIT_IO_IN, 0x3f8..=0x3ff) => data[0] = 0x00,
-        (KVM_EXIT_IO_OUT, _) => {},
-        (KVM_EXIT_IO_IN, _) => data[0] = 0xff,
+            (KVM_EXIT_IO_OUT, _) => {},
+            (KVM_EXIT_IO_IN, _) => data[0] = 0xff,
             (_, _) => data[0] = 0xff
         };
 
@@ -147,7 +146,6 @@ impl VM {
     }
 
     pub fn arch_handle_io(&mut self, io: &IO, base: *mut u8) -> io::Result<()> {
-        //let dev = (io.port as u64) >> 4;
         let dev: DeviceId = match io.port {
             0x3f8..=0x3ff => DeviceId::DEVICE_UART,
             _ => DeviceId::DEVICE_UNKNOWN
