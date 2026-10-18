@@ -6,10 +6,10 @@ use std::collections::VecDeque;
 
 const KVM_IRQ_LINE: libc::Ioctl = _IOW::<kvm_irq_level>(KVMIO, 0x61);
 
-pub fn arch_update_irq(level: u32, vm_fd: libc::c_int) -> io::Result<()> {
+pub fn arch_update_irq(level: u32, vm_fd: libc::c_int, num: u32) -> io::Result<()> {
     let mut irq : kvm_irq_level = unsafe { std::mem::zeroed() };
     irq.level = level;
-    irq.__bindgen_anon_1.irq = 0x4;
+    irq.__bindgen_anon_1.irq = num;
 
     let ret = unsafe {
         libc::ioctl(vm_fd, KVM_IRQ_LINE, &mut irq)
@@ -53,7 +53,7 @@ impl UART {
 
         if level != self.irq_level {
             self.irq_level = level;
-            arch_update_irq(if level { 1 } else { 0 } as u32, self.vm_fd)?;
+            arch_update_irq(if level { 1 } else { 0 } as u32, self.vm_fd, 0x4)?;
         }
 
         Ok(())

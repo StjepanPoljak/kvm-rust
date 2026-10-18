@@ -1,6 +1,6 @@
 use std::io::{ self };
-use crate::{ VM, MMIO, MMIODevice, GuestMemory, KVMIO, TTY, start_tty, kvm_irq_level };
-use crate::{ write_le32, read_le32 };
+use crate::{ VM, MMIO, MMIODevice, GuestMemory, KVMIO, TTY, Args };
+use crate::{ write_le32, read_le32, kvm_irq_level, start_tty };
 use std::collections::HashMap;
 use libc::_IOW;
 use std::sync::{ Arc, Mutex, LazyLock };
@@ -126,7 +126,7 @@ impl UART {
 }
 
 impl VM {
-    pub fn arch_init_mmio_devices(&mut self) -> io::Result<()> {
+    pub fn arch_init_mmio_devices(&mut self, args: &Args) -> io::Result<()> {
         let uart = UART::new(self.fd)?;
         self.mmio_devices.insert(0x9000, uart.clone() as Arc<Mutex<dyn MMIODevice>>);
         Ok(())

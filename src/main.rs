@@ -12,11 +12,11 @@ use std::fs::OpenOptions;
 use std::os::unix::io::AsRawFd;
 use clap::Parser;
 use std::fs::File;
-use std::io::{self, Read};
-use libc::{_IOW, _IO};
+use std::io::{ self, Read };
+use libc::{ _IOW, _IO };
 use std::collections::HashMap;
-use std::sync::{Arc,Mutex};
-use std::sync::atomic::{AtomicBool, Ordering, AtomicU64};
+use std::sync::{ Arc,Mutex };
+use std::sync::atomic::{ AtomicBool, Ordering, AtomicU64 };
 
 type MMIO = kvm_run__bindgen_ty_1__bindgen_ty_6;
 type IO = kvm_run__bindgen_ty_1__bindgen_ty_4;
@@ -58,16 +58,20 @@ pub struct Args {
     memory: usize,
 
     /// Load address
-    #[arg(long, default_value_t = 0x1000)]
+    #[arg(short, long, default_value_t = 0x1000)]
     load_addr: u64,
 
     /// Device tree blob
-    #[arg(short, long)]
-    dtb:Option<String>,
+    #[arg(long)]
+    dtb: Option<String>,
 
     /// Initramfs path
-    #[arg(short, long)]
-    initramfs:Option<String>
+    #[arg(long)]
+    initramfs: Option<String>,
+
+    /// Disk path
+    #[arg(long)]
+    disk: Option<String>
 }
 
 pub struct KvmDev {
@@ -146,6 +150,13 @@ fn gpa_to_host(mem: &GuestMemory, gpa: u64, len: usize) -> Option<*mut u8> {
 fn read_guest_ptr<T>(ptr: *const u8) -> T {
     unsafe {
         std::ptr::read_volatile(ptr.cast::<T>())
+    }
+}
+
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+fn write_guest_ptr<T>(ptr: *mut u8, data: T) {
+    unsafe {
+        std::ptr::write_volatile(ptr.cast::<T>(), data)
     }
 }
 
@@ -230,8 +241,8 @@ impl VM {
         self.arch_load_linux(vcpu, args)
     }
 
-    fn init_mmio_devices(&mut self) -> io::Result<()> {
-        self.arch_init_mmio_devices()
+    fn init_mmio_devices(&mut self, args: &Args) -> io::Result<()> {
+        self.arch_init_mmio_devices(args)
     }
 
     fn init_io_devices(&mut self) -> io::Result<()> {
@@ -307,7 +318,7 @@ fn main() -> io::Result<()> {
 
     arch::arch_init(&kvm_dev, &mut vm, &mut vcpu)?;
 
-    vm.init_mmio_devices()?;
+    vm.init_mmio_devices(&args)?;
     vm.init_io_devices()?;
     vcpu.set_ip(args.load_addr as usize)?;
 

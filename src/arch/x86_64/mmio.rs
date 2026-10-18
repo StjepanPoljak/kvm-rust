@@ -1,8 +1,11 @@
-use std::io::{self};
-use crate::{ VM, MMIO, MMIODevice, GuestMemory };
-use crate::{ read_le32, write_le32, gpa_to_host, read_guest_ptr };
+use std::io::{ self };
+use crate::{ VM, MMIO, MMIODevice, GuestMemory, Args };
+use crate::{ read_le32, write_le32, gpa_to_host, read_guest_ptr, write_guest_ptr };
+use super::arch_update_irq;
 use std::sync::{ Arc, Mutex };
 use std::sync::atomic::{ Ordering, fence };
+use std::fs::{ OpenOptions, File };
+use std::os::unix::fs::FileExt;
 
 #[allow(non_camel_case_types, non_upper_case_globals, non_snake_case, dead_code)]
 mod virtio_bindings {
@@ -18,6 +21,28 @@ pub enum DescType {
     WRITE,
     READ
 }
+
+#[derive(Clone, Copy)]
+pub struct VringQueue {
+    ready: u32,
+    num: u32,
+    last_avail_idx: u16,
+    desc: u64,
+    avail: u64,
+    used: u64
+}
+
+pub struct VirtioBlk {
+    dev_feat_sel: u32,
+    drv_feat_sel: u32,
+    status: u32,
+    curr_queue: u32,
+    queue: [VringQueue; VRING_QUEUES_MAX],
+    disk: File,
+    vm_fd: libc::c_int,
+    irq_status: u32
+}
+const VIRTIO_MMIO_CONFIG_MAX: u32 = VIRTIO_MMIO_CONFIG + 4;
 
 impl vring_avail {
     fn needs_interrupt(&self) -> bool {
@@ -59,47 +84,6 @@ impl virtio_blk_outhdr {
         new_from(bytes, o).unwrap()
     }
 }
-
-#[allow(dead_code)]
-pub fn print_status(status: u32) {
-    if status & VIRTIO_CONFIG_S_ACKNOWLEDGE != 0 {
-        println!("Linux has seen the device and processed generic fields.");
-    }
-    if status & VIRTIO_CONFIG_S_DRIVER != 0 {
-        println!("Kernel found a driver for the device.")
-    }
-    if status & VIRTIO_CONFIG_S_DRIVER_OK != 0 {
-        println!("Driver has used its parts of the config, and is happy.");
-    }
-    if status & VIRTIO_CONFIG_S_FEATURES_OK != 0 {
-        println!("Driver has finished configuring features.")
-    }
-    if status & VIRTIO_CONFIG_S_NEEDS_RESET != 0 {
-        println!("Device entered invalid state, driver must reset it.");
-    }
-    if status & VIRTIO_CONFIG_S_FAILED != 0 {
-        println!("Linux has given up on the device.");
-    }
-}
-
-#[derive(Clone, Copy)]
-pub struct VringQueue {
-    ready: u32,
-    num: u32,
-    last_avail_idx: u16,
-    desc: u64,
-    avail: u64,
-    used: u64
-}
-
-pub struct VirtioBlk {
-    dev_feat_sel: u32,
-    drv_feat_sel: u32,
-    status: u32,
-    curr_queue: u32,
-    queue: [VringQueue; VRING_QUEUES_MAX]
-}
-const VIRTIO_MMIO_CONFIG_MAX: u32 = VIRTIO_MMIO_CONFIG + 4;
 
 impl VringQueue {
     fn get_desc_head(&self, desc_idx: u16, _mem: &GuestMemory) -> vring_desc {
@@ -174,33 +158,29 @@ impl MMIODevice for VirtioBlk {
                 queue.ready = read_le32(&mut mmio.data, 0);
             },
             (false, VIRTIO_MMIO_QUEUE_NOTIFY) => {
-               let curr_queue = read_le32(&mut mmio.data, 0);
+                let curr_queue = read_le32(&mut mmio.data, 0);
                 let queue = &mut self.queue[curr_queue as usize];
-                let vring_avail_raw_ptr = gpa_to_host(_mem, queue.avail, std::mem::size_of::<vring_avail>() + 2 * (queue.num as usize)).unwrap();
+                let vring_avail_raw_ptr = gpa_to_host(_mem, queue.avail, std::mem::size_of::<vring_avail>() + std::mem::size_of::<u16>() * (queue.num as usize)).unwrap();
+                let vring_used_raw_ptr = gpa_to_host(_mem, queue.used, std::mem::size_of::<vring_used>() + std::mem::size_of::<vring_used_elem>() * (queue.num as usize)).unwrap();
                 unsafe {
                     let avail = read_guest_ptr::<vring_avail>(vring_avail_raw_ptr);
-                    println!("flags: {:#x}\r", avail.flags);
-                    println!("idx: {:#x}\r", avail.idx);
-                    if avail.needs_interrupt() {
-                        println!("NEEDS INTERRUPT");
-                    }
                     fence(Ordering::Acquire);
                     while queue.last_avail_idx != avail.idx {
-                        let mut write_buf: Vec<(*mut u8, u32)> = vec![];
+                        let mut write_buf: Vec<&mut [u8]> = vec![];
                         let mut read_buf: Vec<u8> = vec![];
  
                         let avail_slot = ((queue.last_avail_idx as u32) % queue.num) as usize;
-                        let mut desc_idx = read_guest_ptr::<u16>(vring_avail_raw_ptr.add(0x4 + 0x2 * avail_slot));
-                        println!("last_avail_idx {:4}\r", queue.last_avail_idx);
+                        let desc_head_idx = read_guest_ptr::<u16>(vring_avail_raw_ptr.add(0x4 + 0x2 * avail_slot));
+                        let mut desc_idx = desc_head_idx;
                         for _ in 0..queue.num {
                             let desc_head = queue.get_desc_head(desc_idx, &_mem);
-                            println!("    desc {:#x} {:4} {:#x} {:#x}\r",
-                                desc_head.addr,
-                                desc_head.len,
-                                desc_head.flags,
-                                desc_head.next);
                             match desc_head.type_() {
-                                DescType::WRITE => write_buf.push((desc_head.addr as *mut u8, desc_head.len)),
+                                DescType::WRITE => {
+                                    let ptr = gpa_to_host(&_mem, desc_head.addr as u64, desc_head.len as usize).unwrap();
+                                    unsafe {
+                                        write_buf.push(std::slice::from_raw_parts_mut(ptr as *mut u8, desc_head.len as usize));
+                                    }
+                                },
                                 DescType::READ => read_buf.extend_from_slice(desc_head.get_data(&_mem))
                             };
                             if !desc_head.has_next() {
@@ -210,14 +190,33 @@ impl MMIODevice for VirtioBlk {
                         }
                         queue.last_avail_idx = queue.last_avail_idx.wrapping_add(1);
                         let outhdr = new_from::<virtio_blk_outhdr>(&read_buf, 0x0).unwrap();
-                        println!("type: {:#x}\r", outhdr.type_);
-                        println!("ioprio: {:4}\r", outhdr.ioprio);
-                        println!("sector: {:4}\r", outhdr.sector);
-                        /*match outhdr.type_ {
-                            VIRTIO_BLK_T_IN =>
-                        }*/
+                        let (status, data) = write_buf.split_last_mut().unwrap();
+                        let mut offset = outhdr.sector * 512;
+                        let mut buf_num = 0;
+                        for buf in data.iter_mut() {
+                            self.disk.read_exact_at(buf, offset)?;
+                            offset += buf.len() as u64;
+                            buf_num += buf.len() as u64;
+                        }
+                        let used = read_guest_ptr::<vring_used>(vring_used_raw_ptr);
+                        let used_slot = ((used.idx as u32) % queue.num) as usize;
+                        write_guest_ptr::<vring_used_elem>(vring_used_raw_ptr.add(0x4 + std::mem::size_of::<vring_used_elem>() * used_slot), vring_used_elem { id: desc_head_idx as u32, len: buf_num as u32});
+                        status[0] = VIRTIO_BLK_S_OK as u8;
+
+                        fence(Ordering::Release);
+                        write_guest_ptr::<u16>(vring_used_raw_ptr.add(0x2), used.idx + 1);
+
+                        self.irq_status |= VIRTIO_MMIO_INT_VRING;
+                        arch_update_irq(1, self.vm_fd, 0x5)?;
                     }
                }
+            },
+            (true, VIRTIO_MMIO_INTERRUPT_STATUS) => {
+                write_le32(&mut mmio.data, 0, self.irq_status);
+            },
+            (false, VIRTIO_MMIO_INTERRUPT_ACK) => {
+                self.irq_status &= !read_le32(&mut mmio.data, 0);
+                arch_update_irq(0, self.vm_fd, 0x5)?;
             },
             (true, VIRTIO_MMIO_QUEUE_READY) => {
                 let queue = &mut self.queue[self.curr_queue as usize];
@@ -259,15 +258,12 @@ impl MMIODevice for VirtioBlk {
             (true, VIRTIO_MMIO_CONFIG..=VIRTIO_MMIO_CONFIG_MAX) => {
                 match addr - VIRTIO_MMIO_CONFIG {
                     /* capacity is measured in 512 bytes */
-                    0x0 => write_le32(&mut mmio.data, 0, 0x2), /* capacity low */
+                    0x0 => write_le32(&mut mmio.data, 0, (self.disk.metadata()?.len() / 512) as u32), /* capacity low */
                     0x4 => write_le32(&mut mmio.data, 0, 0x0), /* capacity high */
                     _   => println!("Unknown config at {:#x}", addr)
                 };
             },
-            (_, _) => {
-                println!("Got VIRTIO MMIO {} at {:#x}\r",
-                if mmio.is_write != 0 { "write" } else { "read" }, mmio.phys_addr);
-            }
+            (_, _) => ()
         }
         Ok(())
     }
@@ -276,14 +272,22 @@ impl MMIODevice for VirtioBlk {
 const VRING_QUEUES_MAX: usize = 2;
 
 impl VirtioBlk {
-    fn new() -> io::Result<Arc<Mutex<Self>>> {
+    fn new(disk: &str, vm_fd: libc::c_int) -> io::Result<Arc<Mutex<Self>>> {
+        let file = OpenOptions::new()
+            .read(true)
+            .open(disk)
+            .expect(&format!("Failed to open {}.", disk));
+
         Ok(Arc::new(Mutex::new(Self {
             dev_feat_sel: 0,
             drv_feat_sel: 0,
             status: 0,
             curr_queue: 0,
-            queue: [VringQueue::new(); VRING_QUEUES_MAX]
-       })))
+            queue: [VringQueue::new(); VRING_QUEUES_MAX],
+            disk: file,
+            vm_fd: vm_fd,
+            irq_status: 0
+        })))
     }
 }
 
@@ -299,10 +303,13 @@ impl VringQueue {
         }
     }
 }
+
 impl VM {
-     pub fn arch_init_mmio_devices(&mut self) -> io::Result<()> {
-        let virtio_blk = VirtioBlk::new()?;
-        self.mmio_devices.insert(0xd0000, virtio_blk.clone() as Arc<Mutex<dyn MMIODevice>>);
+    pub fn arch_init_mmio_devices(&mut self, args: &Args) -> io::Result<()> {
+        if let Some(disk) = &args.disk {
+            let virtio_blk = VirtioBlk::new(disk, self.fd)?;
+            self.mmio_devices.insert(0xd0000, virtio_blk.clone() as Arc<Mutex<dyn MMIODevice>>);
+        }
         Ok(())
     }
 
