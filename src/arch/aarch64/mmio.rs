@@ -1,12 +1,15 @@
 use std::io::{ self };
-use crate::{ VM, MMIO, MMIODevice, GuestMemory, KVMIO, TTY, Args };
-use crate::{ write_le32, read_le32, kvm_irq_level, start_tty };
+use crate::{ VM, MMIO, MMIODevice, GuestMemory, TTY, Args };
+use crate::{ write_le32, read_le32, start_tty };
+use super::arch_update_irq;
 use std::collections::HashMap;
-use libc::_IOW;
 use std::sync::{ Arc, Mutex, LazyLock };
 use std::io::Write;
 
-const KVM_IRQ_LINE: libc::Ioctl = _IOW::<kvm_irq_level>(KVMIO, 0x61);
+const UART_MMIO_ADDR: u64 = 0x900_0000;
+const UART_IRQ: u32 = 0x1;
+const VIRTIO_BLK_MMIO_ADDR: u64 = 0xa00_0000;
+const VIRTIO_BLK_IRQ: u32 = 0x2;
 
 pub struct UART {
     rx: Option<u8>,
@@ -28,22 +31,6 @@ impl TTY for UART {
         self.ris |= 1 << 4;
         self.update_irq()
     }
-}
-
-pub fn arch_update_irq(level: u32, vm_fd: libc::c_int) -> io::Result<()> {
-    let mut irq : kvm_irq_level = unsafe { std::mem::zeroed() };
-    irq.level = level;
-    irq.__bindgen_anon_1.irq = 0x1000021;
-
-    let ret = unsafe {
-        libc::ioctl(vm_fd, KVM_IRQ_LINE, &mut irq)
-    };
-
-    if ret < 0 {
-        return Err(io::Error::last_os_error());
-    }
-
-    Ok(())
 }
 
 impl MMIODevice for UART {
@@ -121,24 +108,14 @@ impl UART {
     }
 
     pub fn update_irq(&mut self) -> io::Result<()> {
-        arch_update_irq(((self.ris & self.imsc) != 0) as u32, self.vm_fd)
+        arch_update_irq(((self.ris & self.imsc) != 0) as u32, self.vm_fd, UART_IRQ)
     }
 }
 
 impl VM {
     pub fn arch_init_mmio_devices(&mut self, args: &Args) -> io::Result<()> {
         let uart = UART::new(self.fd)?;
-        self.mmio_devices.insert(0x9000, uart.clone() as Arc<Mutex<dyn MMIODevice>>);
-        Ok(())
-    }
-
-    pub fn arch_handle_mmio(&mut self, mmio: &mut MMIO) -> io::Result<()> {
-        let page = mmio.phys_addr >> 12;
-        if let Some(device) = self.mmio_devices.get(&page) {
-            device.lock().unwrap().handle(mmio, &self.guest_memory)?;
-        }
-
-        Ok(())
+        self.add_mmio_device(UART_MMIO_ADDR, uart.clone() as Arc<Mutex<dyn MMIODevice>>);
+        self.init_virtio_blk(args, VIRTIO_BLK_MMIO_ADDR, VIRTIO_BLK_IRQ)
     }
 }
-

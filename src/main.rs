@@ -7,6 +7,7 @@ use kvm_bindings::*;
 include!("frontend/mod.rs");
 include!("util/mod.rs");
 include!("arch/mod.rs");
+include!("virtio/mod.rs");
 
 use std::fs::OpenOptions;
 use std::os::unix::io::AsRawFd;
@@ -138,7 +139,6 @@ impl Drop for MemRegion {
     }
 }
 
-#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 fn gpa_to_host(mem: &GuestMemory, gpa: u64, len: usize) -> Option<*mut u8> {
     mem.iter().find_map(|r| {
         let off = usize::try_from(gpa.checked_sub(r.guest_phys_addr)?).ok()?;
@@ -146,14 +146,12 @@ fn gpa_to_host(mem: &GuestMemory, gpa: u64, len: usize) -> Option<*mut u8> {
     })
 }
 
-#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 fn read_guest_ptr<T>(ptr: *const u8) -> T {
     unsafe {
         std::ptr::read_volatile(ptr.cast::<T>())
     }
 }
 
-#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 fn write_guest_ptr<T>(ptr: *mut u8, data: T) {
     unsafe {
         std::ptr::write_volatile(ptr.cast::<T>(), data)
@@ -249,8 +247,16 @@ impl VM {
         self.arch_init_io_devices()
     }
 
+    fn add_mmio_device(&mut self, addr: u64, device: Arc<Mutex<dyn MMIODevice>>) {
+        self.mmio_devices.insert(addr >> 12, device);
+    }
+
     fn handle_mmio(&mut self, mmio: &mut MMIO) -> io::Result<()> {
-        self.arch_handle_mmio(mmio)
+        let page = mmio.phys_addr >> 12;
+        if let Some(device) = self.mmio_devices.get(&page) {
+            device.lock().unwrap().handle(mmio, &self.guest_memory)?;
+        }
+        Ok(())
     }
 
     fn handle_io(&mut self, io: &IO, base: *mut u8) -> io::Result<()> {
