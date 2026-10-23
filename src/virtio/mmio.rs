@@ -18,7 +18,9 @@ pub trait VirtioDevice {
     fn queue_num_max(&self, queue: u32) -> u32;
     fn read_config(&mut self, offset: u32, data: &mut [u8]) -> io::Result<()>;
     /* Handles one request and returns the number of bytes written to the guest. */
-    fn process(&mut self, chain: &mut DescChain) -> io::Result<u32>;
+    fn process(&mut self, queue: u32, chain: &mut DescChain) -> io::Result<u32>;
+    /* False leaves available chains in the queue, e.g. RX buffers with no frame to fill them. */
+    fn can_process(&self, _queue: u32) -> bool { true }
 }
 
 pub struct VirtioMmio<D: VirtioDevice> {
@@ -56,8 +58,12 @@ impl<D: VirtioDevice> VirtioMmio<D> {
         let Some(queue) = self.queue.get_mut(queue_idx as usize) else {
             return Ok(());
         };
-        while let Some(mut chain) = queue.pop_avail(mem)? {
-            let len = self.device.process(&mut chain)?;
+        if queue.ready == 0 || queue.num == 0 {
+            return Ok(());
+        }
+        while self.device.can_process(queue_idx) {
+            let Some(mut chain) = queue.pop_avail(mem)? else { break; };
+            let len = self.device.process(queue_idx, &mut chain)?;
             queue.push_used(mem, chain.head, len)?;
 
             self.irq_status |= VIRTIO_MMIO_INT_VRING;
@@ -152,6 +158,9 @@ impl<D: VirtioDevice> MMIODevice for VirtioMmio<D> {
             },
             (false, VIRTIO_MMIO_STATUS) => {
                 self.status = read_le32(&mut mmio.data, 0);
+                if self.status & VIRTIO_CONFIG_S_FAILED != 0 {
+                    println!("Warning: Virtio config failed!\r");
+                }
             },
             (false, VIRTIO_MMIO_QUEUE_DESC_LOW) => {
                 let val = read_le32(&mut mmio.data, 0) as u64;
@@ -183,7 +192,15 @@ impl<D: VirtioDevice> MMIODevice for VirtioMmio<D> {
             (true, VIRTIO_MMIO_CONFIG..=VIRTIO_MMIO_CONFIG_MAX) => {
                 self.device.read_config(addr - VIRTIO_MMIO_CONFIG, &mut mmio.data)?;
             },
-            (_, _) => ()
+            (_, _) => {
+           }
+        }
+        Ok(())
+    }
+
+    fn poll(&mut self, mem: &GuestMemory) -> io::Result<()> {
+        for queue_idx in 0..VRING_QUEUES_MAX as u32 {
+            self.queue_notify(queue_idx, mem)?;
         }
         Ok(())
     }

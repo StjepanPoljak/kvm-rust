@@ -1,16 +1,11 @@
 use std::io::{ self };
-use crate::{ VirtioDevice, DescChain, write_le32 };
+use crate::{ VirtioDevice, DescChain, write_le32, new_from };
 use crate::virtio_bindings::*;
 use std::fs::{ OpenOptions, File };
 use std::os::unix::fs::FileExt;
 
 pub struct VirtioBlk {
     disk: File
-}
-
-fn new_from<T>(bytes: &[u8], o: usize) -> Option<T> {
-        let slice = bytes.get(o..o + std::mem::size_of::<T>())?;
-        unsafe { Some(std::ptr::read_unaligned(slice.as_ptr() as *const T)) }
 }
 
 impl virtio_blk_outhdr {
@@ -57,7 +52,7 @@ impl VirtioDevice for VirtioBlk {
         Ok(())
     }
 
-    fn process(&mut self, chain: &mut DescChain) -> io::Result<u32> {
+    fn process(&mut self, queue: u32, chain: &mut DescChain) -> io::Result<u32> {
         let outhdr = new_from::<virtio_blk_outhdr>(&chain.read_buf, 0x0)
             .ok_or(io::Error::other("Virtio-blk request without header."))?;
         let (status, data) = chain.write_buf.split_last_mut()

@@ -1,5 +1,10 @@
 use std::io::{ self };
 
+pub fn new_from<T>(bytes: &[u8], o: usize) -> Option<T> {
+        let slice = bytes.get(o..o + std::mem::size_of::<T>())?;
+        unsafe { Some(std::ptr::read_unaligned(slice.as_ptr() as *const T)) }
+}
+
 pub fn read_le16(b: &[u8], o: usize) -> u16 {
     u16::from_le_bytes([b[o], b[o + 1]])
 }

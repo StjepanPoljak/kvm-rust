@@ -6,7 +6,7 @@ use libc::{_IOW, _IO, _IOWR};
 use object::read::elf::{ElfFile64, SectionHeader};
 use object::{Endianness, Object};
 use std::io;
-use super::mmio::{ VIRTIO_BLK_MMIO_ADDR, VIRTIO_BLK_IRQ };
+use super::mmio::{ VIRTIO_BLK_MMIO_ADDR, VIRTIO_BLK_IRQ, VIRTIO_NET_MMIO_ADDR, VIRTIO_NET_IRQ };
 
 const KVM_CREATE_IRQCHIP: libc::Ioctl = _IO(KVMIO, 0x60);
 const KVM_CREATE_PIT2: libc::Ioctl = _IOW::<kvm_pit_config>(KVMIO, 0x77);
@@ -123,7 +123,7 @@ impl VM {
 
         let last_addr = load_elf(self, &vmlinux, &vmlinux_data, linux_mem_idx)?;
 
-        let cmdline = format!("console=ttyS0,115200 root=/dev/vda rootflags=noload virtio_mmio.device=4K@{:#x}:{}", VIRTIO_BLK_MMIO_ADDR, VIRTIO_BLK_IRQ);
+        let cmdline = format!("console=ttyS0,115200 root=/dev/vda rootflags=noload virtio_mmio.device=4K@{:#x}:{} virtio_mmio.device=4K@{:#x}:{}", VIRTIO_BLK_MMIO_ADDR, VIRTIO_BLK_IRQ, VIRTIO_NET_MMIO_ADDR, VIRTIO_NET_IRQ);
         let mut modlist_entries = vec![];
 
         let hvm_base: u64 = 0x10000;

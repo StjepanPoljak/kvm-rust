@@ -17,7 +17,7 @@ use std::io::{ self, Read };
 use libc::{ _IOW, _IO };
 use std::collections::HashMap;
 use std::sync::{ Arc,Mutex };
-use std::sync::atomic::{ AtomicBool, Ordering, AtomicU64 };
+use std::sync::atomic::{ AtomicBool, Ordering, AtomicU64, AtomicPtr };
 
 type MMIO = kvm_run__bindgen_ty_1__bindgen_ty_6;
 type IO = kvm_run__bindgen_ty_1__bindgen_ty_4;
@@ -27,6 +27,8 @@ type GuestMemory = Vec<MemRegion>;
 
 pub trait MMIODevice {
     fn handle(&mut self, mmio: &mut MMIO, mem: &GuestMemory) -> io::Result<()>;
+    /* Picks up work that arrived from outside the guest, see kick_vcpu(). */
+    fn poll(&mut self, _mem: &GuestMemory) -> io::Result<()> { Ok(()) }
 }
 
 pub trait IODevice {
@@ -35,6 +37,8 @@ pub trait IODevice {
 
 static SHOULD_STOP: AtomicBool = AtomicBool::new(false);
 static MAIN_TID: AtomicU64 = AtomicU64::new(0);
+static DEVICES_PENDING: AtomicBool = AtomicBool::new(false);
+static KVM_RUN_PTR: AtomicPtr<kvm_run> = AtomicPtr::new(std::ptr::null_mut());
 
 const KVM_CREATE_VM: libc::Ioctl = _IO(KVMIO, 0x01);
 const KVM_CREATE_VCPU: libc::Ioctl = _IO(KVMIO, 0x41);
@@ -72,7 +76,11 @@ pub struct Args {
 
     /// Disk path
     #[arg(long)]
-    disk: Option<String>
+    disk: Option<String>,
+
+    /// Tap interface name
+    #[arg(long)]
+    tap: Option<String>
 }
 
 pub struct KvmDev {
@@ -262,6 +270,13 @@ impl VM {
     fn handle_io(&mut self, io: &IO, base: *mut u8) -> io::Result<()> {
         self.arch_handle_io(io, base)
     }
+
+    fn poll_mmio_devices(&mut self) -> io::Result<()> {
+        for device in self.mmio_devices.values() {
+            device.lock().unwrap().poll(&self.guest_memory)?;
+        }
+        Ok(())
+    }
 }
 
 impl Drop for VM {
@@ -303,12 +318,36 @@ extern "C" fn handler(_sig: libc::c_int) {
     SHOULD_STOP.store(true, Ordering::SeqCst);
 }
 
+/* immediate_exit makes KVM_RUN return EINTR even if the kick lands before the vcpu enters the guest. */
+extern "C" fn kick_handler(_sig: libc::c_int) {
+    let run = KVM_RUN_PTR.load(Ordering::SeqCst);
+    if !run.is_null() {
+        unsafe { std::ptr::write_volatile(&mut (*run).immediate_exit, 1); }
+    }
+}
+
+/* Real-time signal, so it can't clash with SIGUSR1/2 users. */
+fn kick_signal() -> libc::c_int {
+    libc::SIGRTMIN()
+}
+
+/* Called from device threads: makes the vcpu thread poll the MMIO devices. */
+pub fn kick_vcpu() {
+    DEVICES_PENDING.store(true, Ordering::SeqCst);
+    let tid = MAIN_TID.load(Ordering::SeqCst) as libc::pthread_t;
+    if tid != 0 {
+        unsafe { libc::pthread_kill(tid, kick_signal()); }
+    }
+}
+
 unsafe fn install_interrupt_signal() {
     let mut sa: libc::sigaction = std::mem::zeroed();
     sa.sa_sigaction = handler as *const() as usize;
     libc::sigemptyset(&mut sa.sa_mask);
     sa.sa_flags = 0;
     libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
+    sa.sa_sigaction = kick_handler as *const() as usize;
+    libc::sigaction(kick_signal(), &sa, std::ptr::null_mut());
 }
 
 fn main() -> io::Result<()> {
@@ -337,15 +376,22 @@ fn main() -> io::Result<()> {
 
     vcpu.set_kvm_run_mem(kvm_dev.get_kvm_run_size())?;
 
-    MAIN_TID.store(unsafe { libc::pthread_self() } as u64, Ordering::SeqCst);
-    unsafe { install_interrupt_signal() };
-
     let run = vcpu.kvm_run_mem as *mut kvm_run;
 
+    /* Handlers first: a kick with the default action would kill us. */
+    unsafe { install_interrupt_signal() };
+    KVM_RUN_PTR.store(run, Ordering::SeqCst);
+    MAIN_TID.store(unsafe { libc::pthread_self() } as u64, Ordering::SeqCst);
+
     loop {
+        if DEVICES_PENDING.swap(false, Ordering::SeqCst) {
+            vm.poll_mmio_devices()?;
+        }
+
         let ret = unsafe { libc::ioctl(vcpu.fd, KVM_RUN, 0usize) };
         if ret < 0 {
             if io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                unsafe { std::ptr::write_volatile(&mut (*run).immediate_exit, 0); }
                 if SHOULD_STOP.load(Ordering::Relaxed) { break; }
                 continue;
             }
