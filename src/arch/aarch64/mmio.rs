@@ -1,5 +1,5 @@
 use std::io::{ self };
-use crate::{ VM, MMIO, MMIODevice, GuestMemory, TTY, Args };
+use crate::{ VM, MMIO, MMIODevice, GuestMemory, TTY, VmControl, Args };
 use crate::{ write_le32, read_le32, start_tty };
 use super::arch_update_irq;
 use std::collections::HashMap;
@@ -74,12 +74,12 @@ static PL011_ID_MAP: LazyLock<HashMap<u32, u32>> = LazyLock::new(|| {
 });
 
 impl UART {
-    fn new(vm_fd: libc::c_int) -> io::Result<Arc<Mutex<Self>>> {
+    fn new(vm_fd: libc::c_int, control: Arc<VmControl>) -> io::Result<Arc<Mutex<Self>>> {
         let uart = Arc::new(Mutex::new(UART {
             fr: 0x90, cr: 0x0, imsc: 0x0, lcr: 0x0, ibrd: 0x0, fbrd: 0x0, icr: 0x0, ris: 0x0, rx: None, vm_fd
         }));
 
-        start_tty(uart.clone());
+        start_tty(uart.clone(), control);
         Ok(uart)
     }
 
@@ -114,7 +114,7 @@ impl UART {
 
 impl VM {
     pub fn arch_init_mmio_devices(&mut self, args: &Args) -> io::Result<()> {
-        let uart = UART::new(self.fd)?;
+        let uart = UART::new(self.fd, self.control.clone())?;
         self.add_mmio_device(UART_MMIO_ADDR, uart.clone() as Arc<Mutex<dyn MMIODevice>>);
         self.init_virtio_blk(args, VIRTIO_BLK_MMIO_ADDR, VIRTIO_BLK_IRQ)
     }

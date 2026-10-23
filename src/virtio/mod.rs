@@ -25,7 +25,7 @@ impl VM {
 
     pub fn init_virtio_net(&mut self, args: &Args, addr: u64, irq: u32) -> io::Result<()> {
         if let Some(tap) = &args.tap {
-            let virtio_net = VirtioMmio::new(VirtioNet::new(tap)?, self.fd, irq);
+            let virtio_net = VirtioMmio::new(VirtioNet::new(tap, self.control.clone())?, self.fd, irq);
             self.add_mmio_device(addr, virtio_net);
         }
         Ok(())

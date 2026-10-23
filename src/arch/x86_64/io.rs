@@ -1,5 +1,5 @@
 use std::io::{ self, Write };
-use crate::{ VM, IO, IODevice, KVMIO, TTY, start_tty, kvm_irq_level, KVM_EXIT_IO_IN, KVM_EXIT_IO_OUT };
+use crate::{ VM, IO, IODevice, KVMIO, TTY, VmControl, start_tty, kvm_irq_level, KVM_EXIT_IO_IN, KVM_EXIT_IO_OUT };
 use std::sync::{ Arc, Mutex };
 use libc::_IOW;
 use std::collections::VecDeque;
@@ -59,10 +59,10 @@ impl UART {
         Ok(())
     }
 
-    fn new(vm_fd: libc::c_int) -> io::Result<Arc<Mutex<Self>>> {
+    fn new(vm_fd: libc::c_int, control: Arc<VmControl>) -> io::Result<Arc<Mutex<Self>>> {
         let uart = Arc::new(Mutex::new(UART { ier: 0x0, fcr: 0x0, lcr: 0x0, mcr: 0x0, lsr: 0x0, msr: 0x0, scr: 0x0, thr_ipending: false, irq_level: false, vm_fd, rx: VecDeque::new() }));
 
-        start_tty(uart.clone());
+        start_tty(uart.clone(), control);
         Ok(uart)
     }
 }
@@ -134,17 +134,17 @@ pub enum DeviceId {
 
 impl VM {
     pub fn arch_init_io_devices(&mut self) -> io::Result<()> {
-        let uart = UART::new(self.fd)?;
+        let uart = UART::new(self.fd, self.control.clone())?;
         self.io_devices.insert(DeviceId::Uart as u64, uart.clone() as Arc<Mutex<dyn IODevice>>);
         Ok(())
     }
 
-    pub fn arch_handle_io(&mut self, io: &IO, base: *mut u8) -> io::Result<()> {
+    pub fn arch_handle_io(&self, io: &IO, base: *mut u8) -> io::Result<()> {
         let dev: DeviceId = match io.port {
             0x3f8..=0x3ff => DeviceId::Uart,
             _ => DeviceId::Unknown
         };
-        if let Some(device) = self.io_devices.get_mut(&(dev as u64)) {
+        if let Some(device) = self.io_devices.get(&(dev as u64)) {
             device.lock().unwrap().handle(io, base)?;
         }
 

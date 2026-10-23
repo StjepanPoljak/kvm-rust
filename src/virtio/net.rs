@@ -1,5 +1,5 @@
 use std::io::{ self };
-use crate::{ VirtioDevice, DescChain, new_from, kick_vcpu };
+use crate::{ VirtioDevice, DescChain, VmControl, new_from };
 use crate::virtio_bindings::*;
 use std::fs::{ OpenOptions, File };
 use std::io::{ Read, Write };
@@ -44,7 +44,7 @@ fn open_tap(name: &str) -> io::Result<File> {
 /* Blocks on the tap and queues incoming frames until the guest takes them.
  * Kicks the vcpu only when the queue goes non-empty: while frames are still
  * pending, the guest refilling its RX buffers triggers the next delivery. */
-fn start_rx_thread(mut tap: File, rx_pending: Arc<Mutex<VecDeque<Vec<u8>>>>) {
+fn start_rx_thread(mut tap: File, rx_pending: Arc<Mutex<VecDeque<Vec<u8>>>>, control: Arc<VmControl>) {
     std::thread::spawn(move || {
         let mut buf = vec![0u8; TAP_FRAME_MAX];
         loop {
@@ -62,17 +62,17 @@ fn start_rx_thread(mut tap: File, rx_pending: Arc<Mutex<VecDeque<Vec<u8>>>>) {
                 pending.len() == 1
             };
             if was_empty {
-                kick_vcpu();
+                control.kick();
             }
         }
     });
 }
 
 impl VirtioNet {
-    pub fn new(tap_name: &str) -> io::Result<Self> {
+    pub fn new(tap_name: &str, control: Arc<VmControl>) -> io::Result<Self> {
         let tap = open_tap(tap_name)?;
         let rx_pending = Arc::new(Mutex::new(VecDeque::new()));
-        start_rx_thread(tap.try_clone()?, rx_pending.clone());
+        start_rx_thread(tap.try_clone()?, rx_pending.clone(), control);
         Ok(Self { tap, rx_pending })
     }
 }

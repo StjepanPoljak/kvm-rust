@@ -1,15 +1,14 @@
 use std::io::{ self };
 use termion::raw::IntoRawMode;
 use std::io::{ stdin, stdout, Read };
-use crate::{ MAIN_TID };
-use std::sync::atomic::Ordering;
+use crate::VmControl;
 use std::sync::{ Arc, Mutex };
 
 pub trait TTY: Send {
     fn send_char(&mut self, ch: u8) -> io::Result<()>;
 }
 
-pub fn start_tty(uart_async: Arc<Mutex<dyn TTY>>) {
+pub fn start_tty(uart_async: Arc<Mutex<dyn TTY>>, control: Arc<VmControl>) {
     std::thread::spawn(move || {
         let mut is_escape = false;
         let raw = stdout().into_raw_mode().unwrap();
@@ -34,7 +33,6 @@ pub fn start_tty(uart_async: Arc<Mutex<dyn TTY>>) {
         }
 
         drop(raw);
-        let tid = MAIN_TID.load(Ordering::SeqCst) as libc::pthread_t;
-        unsafe { libc::pthread_kill(tid, libc::SIGINT); }
+        control.stop();
     });
 }

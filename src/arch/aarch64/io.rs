@@ -24,7 +24,7 @@ pub fn arch_update_irq(level: u32, vm_fd: libc::c_int, num: u32) -> io::Result<(
 }
 
 impl VM {
-    pub fn arch_handle_io(&mut self, _io: &IO, _base: *mut u8) -> io::Result<()> { Ok(()) } 
+    pub fn arch_handle_io(&self, _io: &IO, _base: *mut u8) -> io::Result<()> { Ok(()) } 
 
     pub fn arch_init_io_devices(&mut self) -> io::Result<()> { Ok(()) }
 }

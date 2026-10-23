@@ -10,7 +10,7 @@ const VIRTIO_VENDOR_NONE: u32 = 0x0;
 const VIRTIO_MMIO_CONFIG_MAX: u32 = 0xfff;
 
 /* Device-specific part of a virtio device; VirtioMmio is the transport. */
-pub trait VirtioDevice {
+pub trait VirtioDevice: Send {
     fn device_id(&self) -> u32;
     /* Device feature bits for feature word `sel`, transport bits excluded. */
     fn features(&self, sel: u32) -> u32;

@@ -17,7 +17,8 @@ use std::io::{ self, Read };
 use libc::{ _IOW, _IO };
 use std::collections::HashMap;
 use std::sync::{ Arc,Mutex };
-use std::sync::atomic::{ AtomicBool, Ordering, AtomicU64, AtomicPtr };
+use std::sync::atomic::{ AtomicBool, Ordering };
+use std::cell::Cell;
 
 type MMIO = kvm_run__bindgen_ty_1__bindgen_ty_6;
 type IO = kvm_run__bindgen_ty_1__bindgen_ty_4;
@@ -25,20 +26,73 @@ type MMIODevices = HashMap::<u64, Arc<Mutex<dyn MMIODevice>>>;
 type IODevices = HashMap::<u64, Arc<Mutex<dyn IODevice>>>;
 type GuestMemory = Vec<MemRegion>;
 
-pub trait MMIODevice {
+pub trait MMIODevice: Send {
     fn handle(&mut self, mmio: &mut MMIO, mem: &GuestMemory) -> io::Result<()>;
-    /* Picks up work that arrived from outside the guest, see kick_vcpu(). */
+    /* Picks up work that arrived from outside the guest, see VmControl::kick(). */
     fn poll(&mut self, _mem: &GuestMemory) -> io::Result<()> { Ok(()) }
 }
 
-pub trait IODevice {
+pub trait IODevice: Send {
     fn handle(&mut self, io: &IO, base: *mut u8) -> io::Result<()>;
 }
 
-static SHOULD_STOP: AtomicBool = AtomicBool::new(false);
-static MAIN_TID: AtomicU64 = AtomicU64::new(0);
-static DEVICES_PENDING: AtomicBool = AtomicBool::new(false);
-static KVM_RUN_PTR: AtomicPtr<kvm_run> = AtomicPtr::new(std::ptr::null_mut());
+thread_local! {
+    /* The kvm_run of the vcpu running on this thread, for kick_handler(). */
+    static KVM_RUN_PTR: Cell<*mut kvm_run> = const { Cell::new(std::ptr::null_mut()) };
+}
+
+/* Per-VM state shared by its vcpu threads and device threads. */
+pub struct VmControl {
+    should_stop: AtomicBool,
+    devices_pending: AtomicBool,
+    /* Threads currently in VCPU::run(), the targets of kick_signal(). */
+    vcpu_threads: Mutex<Vec<libc::pthread_t>>
+}
+
+impl VmControl {
+    fn new() -> Self {
+        Self {
+            should_stop: AtomicBool::new(false),
+            devices_pending: AtomicBool::new(false),
+            vcpu_threads: Mutex::new(vec![])
+        }
+    }
+
+    /* Makes every vcpu thread leave its run loop. */
+    pub fn stop(&self) {
+        self.should_stop.store(true, Ordering::SeqCst);
+        for tid in self.vcpu_threads.lock().unwrap().iter() {
+            unsafe { libc::pthread_kill(*tid, kick_signal()); }
+        }
+    }
+
+    /* Called from device threads: makes a vcpu thread poll the MMIO devices. */
+    pub fn kick(&self) {
+        self.devices_pending.store(true, Ordering::SeqCst);
+        if let Some(tid) = self.vcpu_threads.lock().unwrap().first() {
+            unsafe { libc::pthread_kill(*tid, kick_signal()); }
+        }
+    }
+
+    fn should_stop(&self) -> bool {
+        self.should_stop.load(Ordering::SeqCst)
+    }
+
+    fn take_devices_pending(&self) -> bool {
+        self.devices_pending.swap(false, Ordering::SeqCst)
+    }
+
+    /* Kicks only reach registered threads, and a thread is unregistered
+     * under the same lock, so pthread_kill never sees a stale thread id. */
+    fn register_vcpu_thread(&self) {
+        self.vcpu_threads.lock().unwrap().push(unsafe { libc::pthread_self() });
+    }
+
+    fn unregister_vcpu_thread(&self) {
+        let tid = unsafe { libc::pthread_self() };
+        self.vcpu_threads.lock().unwrap().retain(|t| unsafe { libc::pthread_equal(*t, tid) } == 0);
+    }
+}
 
 const KVM_CREATE_VM: libc::Ioctl = _IO(KVMIO, 0x01);
 const KVM_CREATE_VCPU: libc::Ioctl = _IO(KVMIO, 0x41);
@@ -116,7 +170,8 @@ impl KvmDev {
             fd: vm_fd,
             guest_memory: GuestMemory::new(),
             mmio_devices: MMIODevices::new(),
-            io_devices: IODevices::new() })
+            io_devices: IODevices::new(),
+            control: Arc::new(VmControl::new()) })
     }
 
     fn fd(&self) -> libc::c_int {
@@ -132,7 +187,8 @@ pub struct VM {
     pub fd: libc::c_int,
     pub guest_memory: GuestMemory,
     pub mmio_devices: MMIODevices,
-    pub io_devices: IODevices
+    pub io_devices: IODevices,
+    pub control: Arc<VmControl>
 }
 
 pub struct MemRegion {
@@ -140,6 +196,11 @@ pub struct MemRegion {
     pub mem_size: usize,
     pub guest_phys_addr: u64
 }
+
+/* The mapping lives as long as the region, and the guest writes it
+ * concurrently anyway; accesses go through volatile reads and writes. */
+unsafe impl Send for MemRegion {}
+unsafe impl Sync for MemRegion {}
 
 impl Drop for MemRegion {
     fn drop(&mut self) {
@@ -167,14 +228,16 @@ fn write_guest_ptr<T>(ptr: *mut u8, data: T) {
 }
 
 impl VM {
-    fn create_vcpu(&self) -> io::Result<VCPU> {
+    fn create_vcpu(&self, id: u32, kvm_run_size: usize) -> io::Result<VCPU> {
         // 140904 ioctl(9<anon_inode:kvm-vm>, 0xae41 /* KVM_CREATE_VCPU */, 0) = 10<anon_inode:kvm-vcpu:0>
-        let vcpu_fd = unsafe { libc::ioctl(self.fd, KVM_CREATE_VCPU, 0usize) };
+        let vcpu_fd = unsafe { libc::ioctl(self.fd, KVM_CREATE_VCPU, id as usize) };
         if vcpu_fd < 0 {
             return Err(io::Error::last_os_error());
         }
 
-        Ok( VCPU { fd: vcpu_fd, kvm_run_mem: std::ptr::null_mut() } )
+        let mut vcpu = VCPU { id, fd: vcpu_fd, kvm_run_mem: std::ptr::null_mut(), kvm_run_size };
+        vcpu.map_kvm_run()?;
+        Ok(vcpu)
     }
 
     fn add_mem_region(&mut self, mem_size: usize, guest_phys_addr: u64) -> io::Result<usize> {
@@ -259,7 +322,7 @@ impl VM {
         self.mmio_devices.insert(addr >> 12, device);
     }
 
-    fn handle_mmio(&mut self, mmio: &mut MMIO) -> io::Result<()> {
+    fn handle_mmio(&self, mmio: &mut MMIO) -> io::Result<()> {
         let page = mmio.phys_addr >> 12;
         if let Some(device) = self.mmio_devices.get(&page) {
             device.lock().unwrap().handle(mmio, &self.guest_memory)?;
@@ -267,15 +330,48 @@ impl VM {
         Ok(())
     }
 
-    fn handle_io(&mut self, io: &IO, base: *mut u8) -> io::Result<()> {
+    fn handle_io(&self, io: &IO, base: *mut u8) -> io::Result<()> {
         self.arch_handle_io(io, base)
     }
 
-    fn poll_mmio_devices(&mut self) -> io::Result<()> {
+    fn poll_mmio_devices(&self) -> io::Result<()> {
         for device in self.mmio_devices.values() {
             device.lock().unwrap().poll(&self.guest_memory)?;
         }
         Ok(())
+    }
+
+    /* Runs each vcpu on its own thread until the VM stops. The first vcpu
+     * to leave its run loop stops the others; the first error is returned. */
+    fn run(self, vcpus: Vec<VCPU>) -> io::Result<()> {
+        unsafe { install_kick_handler() };
+
+        let vm = Arc::new(self);
+        let mut threads = vec![];
+        let mut res = Ok(());
+        for mut vcpu in vcpus {
+            let vm_thread = vm.clone();
+            let thread = std::thread::Builder::new()
+                .name(format!("vcpu{}", vcpu.id))
+                .spawn(move || {
+                    let res = vcpu.run(&vm_thread);
+                    vm_thread.control.stop();
+                    res
+                });
+            match thread {
+                Ok(thread) => threads.push(thread),
+                Err(e) => { vm.control.stop(); res = Err(e); break; }
+            }
+        }
+
+        for thread in threads {
+            let thread_res = thread.join()
+                .unwrap_or_else(|_| Err(io::Error::other("vCPU thread panicked.")));
+            if res.is_ok() {
+                res = thread_res;
+            }
+        }
+        res
     }
 }
 
@@ -286,41 +382,120 @@ impl Drop for VM {
 }
 
 pub struct VCPU {
+    pub id: u32,
     pub fd: libc::c_int,
-    pub kvm_run_mem: *mut libc::c_void
+    pub kvm_run_mem: *mut libc::c_void,
+    kvm_run_size: usize
 }
 
+/* kvm_run is only touched by the thread running the vcpu. */
+unsafe impl Send for VCPU {}
+
 impl VCPU {
-    fn set_kvm_run_mem(&mut self, kvm_run_size: usize) -> io::Result<()> {
+    fn map_kvm_run(&mut self) -> io::Result<()> {
         // 140904 mmap(NULL, 12288, 0x3 /* PROT_READ|PROT_WRITE */, 0x1 /* MAP_SHARED */, 10<anon_inode:kvm-vcpu:0>, 0) = 0x7769050b0000
         self.kvm_run_mem = unsafe {
             libc::mmap(std::ptr::null_mut(),
-                       kvm_run_size as usize,
+                       self.kvm_run_size,
                        libc::PROT_READ|libc::PROT_WRITE,
                        libc::MAP_SHARED,
                        self.fd,
                        0)
         };
         if self.kvm_run_mem == libc::MAP_FAILED {
+            self.kvm_run_mem = std::ptr::null_mut();
             return Err(io::Error::last_os_error());
         }
+        Ok(())
+    }
+
+    /* Runs the vcpu on the calling thread until it exits or the VM stops. */
+    fn run(&mut self, vm: &VM) -> io::Result<()> {
+        KVM_RUN_PTR.set(self.kvm_run_mem as *mut kvm_run);
+        vm.control.register_vcpu_thread();
+        let res = self.run_loop(vm);
+        vm.control.unregister_vcpu_thread();
+        KVM_RUN_PTR.set(std::ptr::null_mut());
+        res
+    }
+
+    fn run_loop(&mut self, vm: &VM) -> io::Result<()> {
+        let run = self.kvm_run_mem as *mut kvm_run;
+
+        loop {
+            if vm.control.should_stop() {
+                break;
+            }
+            if vm.control.take_devices_pending() {
+                vm.poll_mmio_devices()?;
+            }
+
+            let ret = unsafe { libc::ioctl(self.fd, KVM_RUN, 0usize) };
+            if ret < 0 {
+                if io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                    unsafe { std::ptr::write_volatile(&mut (*run).immediate_exit, 0); }
+                    continue;
+                }
+                self.print_regs()?;
+                return Err(io::Error::last_os_error());
+            }
+
+            let exit_reason = unsafe { (*run).exit_reason };
+
+            match exit_reason {
+                KVM_EXIT_IO => {
+                    let io = unsafe { (*run).__bindgen_anon_1.io };
+                    vm.handle_io(&io, self.kvm_run_mem as *mut u8)?;
+                }
+                KVM_EXIT_SHUTDOWN => {
+                    println!("Guest shutdown.");
+                    self.print_regs()?;
+                    break; }
+                KVM_EXIT_MMIO => {
+                    let mmio = unsafe { &mut (*run).__bindgen_anon_1.mmio };
+                    vm.handle_mmio(mmio)?
+                }
+                KVM_EXIT_HLT => {
+                    println!("Guest halted.");
+                    break; }
+                KVM_EXIT_INTERNAL_ERROR => {
+                    let internal = unsafe { (*run).__bindgen_anon_1.internal };
+                    println!("suberror: {:#x}", internal.suberror);
+                    for i in 0..internal.ndata {
+                        println!("{:4}: {:#x}", i, internal.data[i as usize]);
+                    }
+                    return Err(io::Error::other("KVM internal error."));
+                }
+                KVM_EXIT_FAIL_ENTRY => {
+                    let fail_entry = unsafe { (*run).__bindgen_anon_1.fail_entry };
+                    let reason = fail_entry.hardware_entry_failure_reason;
+                    let cpu = fail_entry.cpu;
+                    println!("Fail entry: reason={:#x}, cpu={}", reason, cpu);
+                    break;
+                }
+                _ => {
+                    println!("EXIT REASON = {}", exit_reason);
+                    break;
+                }
+            }
+        }
+
         Ok(())
     }
 }
 
 impl Drop for VCPU {
     fn drop(&mut self) {
+        if !self.kvm_run_mem.is_null() {
+            unsafe { libc::munmap(self.kvm_run_mem, self.kvm_run_size); }
+        }
         unsafe { libc::close(self.fd); }
     }
 }
 
-extern "C" fn handler(_sig: libc::c_int) {
-    SHOULD_STOP.store(true, Ordering::SeqCst);
-}
-
 /* immediate_exit makes KVM_RUN return EINTR even if the kick lands before the vcpu enters the guest. */
 extern "C" fn kick_handler(_sig: libc::c_int) {
-    let run = KVM_RUN_PTR.load(Ordering::SeqCst);
+    let run = KVM_RUN_PTR.get();
     if !run.is_null() {
         unsafe { std::ptr::write_volatile(&mut (*run).immediate_exit, 1); }
     }
@@ -331,22 +506,12 @@ fn kick_signal() -> libc::c_int {
     libc::SIGRTMIN()
 }
 
-/* Called from device threads: makes the vcpu thread poll the MMIO devices. */
-pub fn kick_vcpu() {
-    DEVICES_PENDING.store(true, Ordering::SeqCst);
-    let tid = MAIN_TID.load(Ordering::SeqCst) as libc::pthread_t;
-    if tid != 0 {
-        unsafe { libc::pthread_kill(tid, kick_signal()); }
-    }
-}
-
-unsafe fn install_interrupt_signal() {
+/* Must run before any vcpu thread registers: the default action would kill us. */
+unsafe fn install_kick_handler() {
     let mut sa: libc::sigaction = std::mem::zeroed();
-    sa.sa_sigaction = handler as *const() as usize;
+    sa.sa_sigaction = kick_handler as *const() as usize;
     libc::sigemptyset(&mut sa.sa_mask);
     sa.sa_flags = 0;
-    libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
-    sa.sa_sigaction = kick_handler as *const() as usize;
     libc::sigaction(kick_signal(), &sa, std::ptr::null_mut());
 }
 
@@ -357,87 +522,24 @@ fn main() -> io::Result<()> {
 
     arch::arch_pre_vcpu_init(&kvm_dev, &mut vm)?;
 
-    let mut vcpu = vm.create_vcpu()?;
+    let mut vcpu = vm.create_vcpu(0, kvm_dev.get_kvm_run_size())?;
 
     println!("\nKVM Rust\r");
 
     arch::arch_init(&kvm_dev, &mut vm, &mut vcpu)?;
 
-    vm.init_mmio_devices(&args)?;
-    vm.init_io_devices()?;
     vcpu.set_ip(args.load_addr as usize)?;
 
+    /* Guest memory is complete before any device (and device thread) exists. */
     if let Some(_) = args.linux {
         vm.load_linux(&mut vcpu, &args).unwrap();
-    } else if let Some(binary) = args.binary {
+    } else if let Some(binary) = &args.binary {
         let mem_region_idx = vm.add_mem_region(args.memory * 1024, 0x0)?;
-        vm.load_file_to_memory(mem_region_idx, &binary, args.load_addr)?;
+        vm.load_file_to_memory(mem_region_idx, binary, args.load_addr)?;
     }
 
-    vcpu.set_kvm_run_mem(kvm_dev.get_kvm_run_size())?;
+    vm.init_mmio_devices(&args)?;
+    vm.init_io_devices()?;
 
-    let run = vcpu.kvm_run_mem as *mut kvm_run;
-
-    /* Handlers first: a kick with the default action would kill us. */
-    unsafe { install_interrupt_signal() };
-    KVM_RUN_PTR.store(run, Ordering::SeqCst);
-    MAIN_TID.store(unsafe { libc::pthread_self() } as u64, Ordering::SeqCst);
-
-    loop {
-        if DEVICES_PENDING.swap(false, Ordering::SeqCst) {
-            vm.poll_mmio_devices()?;
-        }
-
-        let ret = unsafe { libc::ioctl(vcpu.fd, KVM_RUN, 0usize) };
-        if ret < 0 {
-            if io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
-                unsafe { std::ptr::write_volatile(&mut (*run).immediate_exit, 0); }
-                if SHOULD_STOP.load(Ordering::Relaxed) { break; }
-                continue;
-            }
-            vcpu.print_regs()?;
-            return Err(io::Error::last_os_error());
-        }
-
-        let exit_reason = unsafe { (*run).exit_reason };
-
-        match exit_reason {
-            KVM_EXIT_IO => {
-                let io = unsafe { (*run).__bindgen_anon_1.io };
-                vm.handle_io(&io, vcpu.kvm_run_mem as *mut u8)?;
-            }
-            KVM_EXIT_SHUTDOWN => {
-                println!("Guest shutdown.");
-                vcpu.print_regs()?;
-                break; }
-            KVM_EXIT_MMIO => {
-                let mmio = unsafe { &mut (*run).__bindgen_anon_1.mmio };
-                vm.handle_mmio(mmio)?
-            }
-            KVM_EXIT_HLT => {
-                println!("Guest halted.");
-                break; }
-            KVM_EXIT_INTERNAL_ERROR => {
-                let internal = unsafe { (*run).__bindgen_anon_1.internal };
-                println!("suberror: {:#x}", internal.suberror);
-                for i in 0..internal.ndata {
-                    println!("{:4}: {:#x}", i, internal.data[i as usize]);
-                }
-                return Err(io::Error::other("KVM internal error."));
-            }
-            KVM_EXIT_FAIL_ENTRY => {
-                let fail_entry = unsafe { (*run).__bindgen_anon_1.fail_entry };
-                let reason = fail_entry.hardware_entry_failure_reason;
-                let cpu = fail_entry.cpu;
-                println!("Fail entry: reason={:#x}, cpu={}", reason, cpu);
-                break;
-            }
-            _ => {
-                println!("EXIT REASON = {}", exit_reason);
-                break;
-            }
-        }
-    }
-
-    Ok(())
+    vm.run(vec![vcpu])
 }
