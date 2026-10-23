@@ -118,8 +118,17 @@ impl VM {
 
         let pvh_entrypoint = self.try_pvh_entrypoint(&vmlinux)?;
 
-        let ram_size: u64 = 1024 * 1024 * 1024;
-        let linux_mem_idx = self.add_mem_region(ram_size as usize, 0x0)?;
+        const EBDA_START: u64 = 0x9fc00;
+        const HIMEM_START: u64 = 0x10_0000;
+        const MMIO_START: u64 = 0xc000_0000;
+        const HIGH_RAM_START: u64 = 0x1_0000_0000;
+
+        /* RAM above MMIO_START moves to 4G so the MMIO hole stays free for devices. */
+        let ram_size = args.memory.unwrap_or(1 << 30) as u64;
+        let linux_mem_idx = self.add_mem_region(ram_size.min(MMIO_START) as usize, 0x0)?;
+        if ram_size > MMIO_START {
+            self.add_mem_region((ram_size - MMIO_START) as usize, HIGH_RAM_START)?;
+        }
 
         let last_addr = load_elf(self, &vmlinux, &vmlinux_data, linux_mem_idx)?;
 
@@ -146,18 +155,12 @@ impl VM {
             None => ()
         }
 
-        const EBDA_START: u64 = 0x9fc00;
-        const HIMEM_START: u64 = 0x10_0000;
-        const MMIO_START: u64 = 0xc000_0000;
-        const HIGH_RAM_START: u64 = 0x1_0000_0000;
-
         let mut memmap_entries = vec![
             HvmMemmapEntry { addr: 0x0, size: EBDA_START, type_: 1, reserved: 0 },
             HvmMemmapEntry { addr: EBDA_START, size: HIMEM_START - EBDA_START, type_: 2, reserved: 0 },
             HvmMemmapEntry { addr: HIMEM_START, size: ram_size.min(MMIO_START) - HIMEM_START, type_: 1, reserved: 0}
         ];
         if ram_size > MMIO_START {
-            /* needs another slot alloc */
             memmap_entries.push(HvmMemmapEntry { addr: HIGH_RAM_START, size: ram_size - MMIO_START, type_: 1, reserved: 0 });
         }
 

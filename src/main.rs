@@ -112,9 +112,10 @@ pub struct Args {
     #[arg(long)]
     linux: Option<String>,
 
-    /// Memory size in kilobytes
-    #[arg(short, long, default_value_t = 256)]
-    memory: usize,
+    /// Memory size: a number with a K, M or G suffix; a plain number is
+    /// in kilobytes [default: 256K for --binary, 1G for --linux]
+    #[arg(short, long, value_parser = parse_mem_size)]
+    memory: Option<usize>,
 
     /// Load address
     #[arg(short, long, default_value_t = 0x1000)]
@@ -135,6 +136,24 @@ pub struct Args {
     /// Tap interface name
     #[arg(long)]
     tap: Option<String>
+}
+
+/* Returns the size in bytes. */
+fn parse_mem_size(arg: &str) -> Result<usize, String> {
+    let (num, unit) = match arg.char_indices().last() {
+        Some((i, c)) if c.is_ascii_alphabetic() => (&arg[..i], c.to_ascii_uppercase()),
+        _ => (arg, 'K')
+    };
+    let shift = match unit {
+        'K' => 10,
+        'M' => 20,
+        'G' => 30,
+        _ => return Err(format!("unknown size suffix '{}'", unit))
+    };
+    let num: usize = num.parse().map_err(|e| format!("{}", e))?;
+    num.checked_mul(1 << shift)
+        .filter(|size| *size > 0)
+        .ok_or(format!("invalid memory size {}", arg))
 }
 
 pub struct KvmDev {
@@ -534,7 +553,7 @@ fn main() -> io::Result<()> {
     if let Some(_) = args.linux {
         vm.load_linux(&mut vcpu, &args).unwrap();
     } else if let Some(binary) = &args.binary {
-        let mem_region_idx = vm.add_mem_region(args.memory * 1024, 0x0)?;
+        let mem_region_idx = vm.add_mem_region(args.memory.unwrap_or(256 << 10), 0x0)?;
         vm.load_file_to_memory(mem_region_idx, binary, args.load_addr)?;
     }
 

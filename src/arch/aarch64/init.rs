@@ -109,7 +109,8 @@ impl VM {
         let file_len = std::fs::metadata(linux_path)?.len() as usize;
 
         println!("magic {:#x}, image_size: {}, file_size: {}, text_offset: {:#x}\r", header.magic, header.image_size, file_len, header.text_offset);
-        let linux_mem_idx = self.add_mem_region(1024 * 1024 * 1024, LOAD_ADDR)?;
+        /* Must match the memory node in the DTB. */
+        let linux_mem_idx = self.add_mem_region(args.memory.unwrap_or(1 << 30), LOAD_ADDR)?;
 
         match &args.dtb {
             Some(dtb_path) => { self.load_file_to_memory(linux_mem_idx, &dtb_path, 0x0)?; },
