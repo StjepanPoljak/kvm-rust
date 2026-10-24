@@ -144,7 +144,11 @@ impl VM {
         self.io_devices.insert(DeviceId::I8042 as u64, i8042.clone() as Arc<Mutex<dyn IODevice>>);
         self.keyboard = Some(i8042);
         let framebuffer = gpa_to_host(&self.guest_memory, VGA_FRAMEBUFFER, VGA_FRAMEBUFFER_SIZE);
-        let vga = Vga::new(framebuffer.map(|p| p as *const u8));
+        let dirty_log = match framebuffer {
+            Some(_) => Some(self.log_dirty_pages(VGA_FRAMEBUFFER, VGA_FRAMEBUFFER_SIZE)?),
+            None => None
+        };
+        let vga = Vga::new(framebuffer.map(|p| p as *const u8), dirty_log);
         self.io_devices.insert(DeviceId::Vga as u64, vga.clone() as Arc<Mutex<dyn IODevice>>);
         self.display = Some(vga);
         Ok(())

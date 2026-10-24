@@ -99,6 +99,8 @@ const KVM_CREATE_VCPU: libc::Ioctl = _IO(KVMIO, 0x41);
 const KVM_GET_VCPU_MMAP_SIZE: libc::Ioctl = _IO(KVMIO, 0x04);
 
 const KVM_SET_USER_MEMORY_REGION: libc::Ioctl = _IOW::<kvm_userspace_memory_region>(KVMIO, 0x46);
+const KVM_GET_DIRTY_LOG: libc::Ioctl = _IOW::<kvm_dirty_log>(KVMIO, 0x42);
+const PAGE_SIZE: u64 = 4096;
 const KVM_RUN: libc::Ioctl = _IO(KVMIO, 0x80);
 
 #[derive(Parser, Debug)]
@@ -197,6 +199,7 @@ impl KvmDev {
         Ok(VM {
             fd: vm_fd,
             guest_memory: GuestMemory::new(),
+            next_slot: 0,
             mmio_devices: MMIODevices::new(),
             io_devices: IODevices::new(),
             display: None,
@@ -216,6 +219,7 @@ impl KvmDev {
 pub struct VM {
     pub fd: libc::c_int,
     pub guest_memory: GuestMemory,
+    next_slot: u32,
     pub mmio_devices: MMIODevices,
     pub io_devices: IODevices,
     /* Set by the devices that provide them, for frontends such as RFB. */
@@ -227,7 +231,38 @@ pub struct VM {
 pub struct MemRegion {
     pub mem_ptr: *mut libc::c_void,
     pub mem_size: usize,
-    pub guest_phys_addr: u64
+    pub guest_phys_addr: u64,
+    /* The KVM slot covering all of it; None once log_dirty_pages has
+     * split it into several. */
+    slot: Option<u32>
+}
+
+/* Which pages of a memory slot the guest has written since the last
+ * fetch. KVM write-protects the slot's pages and notes each one on its
+ * first write (or, on Intel, the CPU logs it with PML). */
+pub struct DirtyLog {
+    vm_fd: libc::c_int,
+    slot: u32,
+    pages: usize
+}
+
+impl DirtyLog {
+    /* A bit per page, set if the page was written; fetching clears the
+     * log, so a write made after this returns is in the next one. */
+    pub fn fetch(&self) -> io::Result<Vec<u64>> {
+        /* KVM copies whole longs. */
+        let mut bitmap = vec![0u64; self.pages.div_ceil(64)];
+        let log = kvm_dirty_log {
+            slot: self.slot,
+            padding1: 0,
+            __bindgen_anon_1: kvm_dirty_log__bindgen_ty_1 { dirty_bitmap: bitmap.as_mut_ptr().cast() }
+        };
+        let ret = unsafe { libc::ioctl(self.vm_fd, KVM_GET_DIRTY_LOG, &log) };
+        if ret < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(bitmap)
+    }
 }
 
 /* The mapping lives as long as the region, and the guest writes it
@@ -288,23 +323,60 @@ impl VM {
             return Err(io::Error::last_os_error());
         }
 
-        // 140900 ioctl(9<anon_inode:kvm-vm>, 0x4020ae46 /* KVM_SET_USER_MEMORY_REGION */, {slot=0, flags=0, guest_phys_addr=0, memory_size=1073741824, userspace_addr=0x7768b3e00000}) = 0
-        let region = kvm_userspace_memory_region {
-            slot : self.guest_memory.len() as u32,
-            flags : 0,
-            guest_phys_addr : guest_phys_addr,
-            memory_size : mem_size as u64,
-            userspace_addr : mem_ptr as u64
-        };
+        let slot = self.next_slot;
+        self.next_slot += 1;
+        self.set_user_memory_region(slot, 0, guest_phys_addr, mem_size as u64, mem_ptr as u64)?;
+        self.guest_memory.push(MemRegion { mem_ptr, mem_size, guest_phys_addr, slot: Some(slot) });
 
+        Ok(self.guest_memory.len() - 1)
+    }
+
+    /* A memory_size of 0 deletes the slot. */
+    fn set_user_memory_region(&self, slot: u32, flags: u32, guest_phys_addr: u64,
+                              memory_size: u64, userspace_addr: u64) -> io::Result<()> {
+        // 140900 ioctl(9<anon_inode:kvm-vm>, 0x4020ae46 /* KVM_SET_USER_MEMORY_REGION */, {slot=0, flags=0, guest_phys_addr=0, memory_size=1073741824, userspace_addr=0x7768b3e00000}) = 0
+        let region = kvm_userspace_memory_region { slot, flags, guest_phys_addr, memory_size, userspace_addr };
         let ret = unsafe { libc::ioctl(self.fd, KVM_SET_USER_MEMORY_REGION, &region) };
         if ret < 0 {
             return Err(io::Error::last_os_error());
         }
+        Ok(())
+    }
 
-        self.guest_memory.push(MemRegion { mem_ptr, mem_size, guest_phys_addr });
+    /* Starts logging writes to the pages covering gpa..gpa + size. Logging
+     * is per slot, and a slot cannot be resized, so the region's slot is
+     * deleted and added again as up to three: before, logged, after. The
+     * mapping stays one piece. Once per region, before the vcpus run. */
+    pub fn log_dirty_pages(&mut self, gpa: u64, size: usize) -> io::Result<DirtyLog> {
+        let start = gpa & !(PAGE_SIZE - 1);
+        let end = (gpa + size as u64).next_multiple_of(PAGE_SIZE);
+        let idx = self.guest_memory.iter()
+            .position(|r| r.guest_phys_addr <= start && end <= r.guest_phys_addr + r.mem_size as u64)
+            .ok_or(io::Error::other(format!("No memory region covers {:#x}..{:#x}.", start, end)))?;
+        let region = &self.guest_memory[idx];
+        let (base, host) = (region.guest_phys_addr, region.mem_ptr as u64);
+        let region_end = base + region.mem_size as u64;
+        let slot = region.slot.ok_or(io::Error::other("Memory region is already split."))?;
 
-        Ok(self.guest_memory.len() - 1)
+        self.set_user_memory_region(slot, 0, base, 0, host)?;
+        let mut logged = None;
+        let mut free_slot = Some(slot);
+        for (from, to, flags) in [(base, start, 0), (start, end, KVM_MEM_LOG_DIRTY_PAGES), (end, region_end, 0)] {
+            if from == to {
+                continue;
+            }
+            let slot = free_slot.take().unwrap_or_else(|| {
+                self.next_slot += 1;
+                self.next_slot - 1
+            });
+            self.set_user_memory_region(slot, flags, from, to - from, host + (from - base))?;
+            if flags != 0 {
+                logged = Some(slot);
+            }
+        }
+        self.guest_memory[idx].slot = None;
+
+        Ok(DirtyLog { vm_fd: self.fd, slot: logged.unwrap(), pages: ((end - start) / PAGE_SIZE) as usize })
     }
 
     fn load_data_to_memory(&self, mem_region_idx: usize, data: Vec<u8>, offset: u64) -> io::Result<usize> {

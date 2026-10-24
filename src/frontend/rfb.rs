@@ -5,12 +5,13 @@
  *
  * Every client gets two threads: one parses its messages, the other
  * sends framebuffer updates when the client has asked for one and the
- * frame has changed, polling the Display at UPDATE_INTERVAL. Updates
- * use the Raw encoding and cover the rows that changed.
+ * Display says rows have changed, polling it at UPDATE_INTERVAL.
+ * Updates use the Raw encoding and cover the rows that changed.
  */
 
 use std::io::{ self, Read, Write };
 use std::net::{ TcpListener, TcpStream, ToSocketAddrs };
+use std::ops::Range;
 use std::sync::{ Arc, Mutex };
 use std::sync::mpsc::{ self, Receiver, RecvTimeoutError, Sender };
 use std::time::Duration;
@@ -35,8 +36,11 @@ const MSG_FRAMEBUFFER_UPDATE: u8 = 0;
 pub trait Display: Send + Sync {
     /* Width and height in pixels; read once per client. */
     fn size(&self) -> (u16, u16);
-    /* Fills `out` (width * height) with the current frame as 0x00RRGGBB. */
-    fn render(&self, out: &mut [u32]);
+    /* Brings `out` (width * height, 0x00RRGGBB) from frame `*seen` to
+     * the current one, which it stores in `*seen`: draws the rows that
+     * changed in between, from the first to the last, and returns them.
+     * A `*seen` of 0 draws them all. Frames are the Display's own. */
+    fn render(&self, out: &mut [u32], seen: &mut u64) -> Option<Range<usize>>;
 }
 
 /* What a VNC client types into, e.g. a PS/2 keyboard. */
@@ -49,7 +53,14 @@ struct NoDisplay;
 
 impl Display for NoDisplay {
     fn size(&self) -> (u16, u16) { NO_DISPLAY_SIZE }
-    fn render(&self, out: &mut [u32]) { out.fill(0); }
+    fn render(&self, out: &mut [u32], seen: &mut u64) -> Option<Range<usize>> {
+        if *seen != 0 {
+            return None;
+        }
+        out.fill(0);
+        *seen = 1;
+        Some(0..NO_DISPLAY_SIZE.1 as usize)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -274,8 +285,8 @@ fn send_updates(mut stream: TcpStream, display: Arc<dyn Display>, width: u16, he
     let (w, h) = (width as usize, height as usize);
     let mut format = PixelFormat::DEFAULT;
     let mut frame = vec![0u32; w * h];
-    /* What the client has: None until the first update. */
-    let mut sent: Option<Vec<u32>> = None;
+    /* The Display's frame the client has; 0 until the first update. */
+    let mut seen = 0;
     let mut pending = false;
     let mut out = Vec::new();
 
@@ -284,13 +295,13 @@ fn send_updates(mut stream: TcpStream, display: Arc<dyn Display>, width: u16, he
             Ok(Request::PixelFormat(f)) => {
                 format = f;
                 /* Pixels already sent were in the old format. */
-                sent = None;
+                seen = 0;
                 continue;
             },
             Ok(Request::Update { incremental }) => {
                 pending = true;
                 if !incremental {
-                    sent = None;
+                    seen = 0;
                 }
             },
             Err(RecvTimeoutError::Timeout) => (),
@@ -300,13 +311,8 @@ fn send_updates(mut stream: TcpStream, display: Arc<dyn Display>, width: u16, he
             continue;
         }
 
-        display.render(&mut frame);
-        let rows = match &sent {
-            None => Some((0, h)),
-            Some(old) => changed_rows(old, &frame, w)
-        };
         /* An incremental request waits until something changes. */
-        let Some((first, last)) = rows else { continue };
+        let Some(Range { start: first, end: last }) = display.render(&mut frame, &mut seen) else { continue };
 
         out.clear();
         out.extend_from_slice(&[MSG_FRAMEBUFFER_UPDATE, 0]);
@@ -319,22 +325,8 @@ fn send_updates(mut stream: TcpStream, display: Arc<dyn Display>, width: u16, he
             format.encode(pixel, &mut out);
         }
         stream.write_all(&out)?;
-
-        match &mut sent {
-            Some(old) => old.copy_from_slice(&frame),
-            None => sent = Some(frame.clone())
-        }
         pending = false;
     }
-}
-
-/* The first changed row and one past the last, or None. */
-fn changed_rows(old: &[u32], new: &[u32], width: usize) -> Option<(usize, usize)> {
-    let differs = |y: &usize| old[y * width..(y + 1) * width] != new[y * width..(y + 1) * width];
-    let rows = old.len() / width;
-    let first = (0..rows).find(differs)?;
-    let last = (0..rows).rev().find(differs).unwrap();
-    Some((first, last + 1))
 }
 
 #[cfg(test)]
@@ -343,14 +335,34 @@ mod tests {
     use std::sync::Mutex;
 
     /* 4x2: red, green, blue, white over four greys; the first pixel
-     * turns black after the first update. */
+     * turns black after the first update. Frame 1, then each change is
+     * a frame with the rows it changed. */
     struct Pattern {
-        frame: Mutex<Vec<u32>>
+        frame: Mutex<(u64, Vec<u32>, Range<usize>)>
+    }
+
+    impl Pattern {
+        fn set(&self, i: usize, rgb: u32) {
+            let (frame, pixels, rows) = &mut *self.frame.lock().unwrap();
+            *frame += 1;
+            pixels[i] = rgb;
+            *rows = i / 4..i / 4 + 1;
+        }
     }
 
     impl Display for Pattern {
         fn size(&self) -> (u16, u16) { (4, 2) }
-        fn render(&self, out: &mut [u32]) { out.copy_from_slice(&self.frame.lock().unwrap()); }
+        fn render(&self, out: &mut [u32], seen: &mut u64) -> Option<Range<usize>> {
+            let (frame, pixels, rows) = &*self.frame.lock().unwrap();
+            let rows = match *seen {
+                s if s == *frame => return None,
+                s if s + 1 == *frame => rows.clone(),
+                _ => 0..2
+            };
+            out.copy_from_slice(pixels);
+            *seen = *frame;
+            Some(rows)
+        }
     }
 
     struct Keys(Vec<(bool, u32)>);
@@ -376,8 +388,8 @@ mod tests {
     #[test]
     fn session() {
         let display = Arc::new(Pattern {
-            frame: Mutex::new(vec![0xff0000, 0x00ff00, 0x0000ff, 0xffffff,
-                                   0x101010, 0x202020, 0x303030, 0x404040])
+            frame: Mutex::new((1, vec![0xff0000, 0x00ff00, 0x0000ff, 0xffffff,
+                                       0x101010, 0x202020, 0x303030, 0x404040], 0..2))
         });
         let keys = Arc::new(Mutex::new(Keys(vec![])));
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -429,7 +441,7 @@ mod tests {
         assert_eq!(rect, [0, 0, 4, 2]);
         assert_eq!(&pixels[..8], &[0xf8, 0x00, 0x07, 0xe0, 0x00, 0x1f, 0xff, 0xff]);
 
-        display.frame.lock().unwrap()[0] = 0;
+        display.set(0, 0);
         client.write_all(&[MSG_FRAMEBUFFER_UPDATE_REQUEST, 1, 0, 0, 0, 0, 0, 4, 0, 2]).unwrap();
         let (rect, pixels) = read_update(&mut client, 2);
         assert_eq!(rect, [0, 0, 4, 1]);

@@ -1,20 +1,27 @@
 use std::io::{ self };
 use std::sync::{ Arc, Mutex };
 use std::time::Instant;
-use crate::{ IO, IODevice, Display, read_guest_ptr, KVM_EXIT_IO_IN, KVM_EXIT_IO_OUT };
+use std::ops::Range;
+use crate::{ IO, IODevice, Display, DirtyLog, read_guest_ptr, KVM_EXIT_IO_IN, KVM_EXIT_IO_OUT, PAGE_SIZE };
 
 /* A VGA adapter showing mode 13h: 320x200, a byte per pixel indexing
  * the 256-colour DAC palette, framebuffer linear at 0xA0000. The
  * framebuffer is plain guest RAM, so drawing costs no exits; only the
  * registers are trapped. They are stored and read back but not
  * interpreted: whatever mode the guest sets, the frontends get mode 13h,
- * blanked while the attribute controller has the display off. */
+ * blanked while the attribute controller has the display off.
+ *
+ * Which rows changed comes from KVM's dirty log of the framebuffer's
+ * pages, so a frontend never compares frames; a palette change or the
+ * display going on or off redraws them all. */
 
 pub const VGA_PORTS: std::ops::RangeInclusive<u16> = 0x3c0..=0x3df;
 pub const VGA_FRAMEBUFFER: u64 = 0xa0000;
 const WIDTH: usize = 320;
 const HEIGHT: usize = 200;
 pub const VGA_FRAMEBUFFER_SIZE: usize = WIDTH * HEIGHT;
+/* VGA_FRAMEBUFFER is page-aligned. */
+const FRAMEBUFFER_PAGES: usize = VGA_FRAMEBUFFER_SIZE.div_ceil(PAGE_SIZE as usize);
 
 const AC_INDEX: u16 = 0x3c0;        /* write: index and data in turn */
 const AC_READ: u16 = 0x3c1;
@@ -71,7 +78,15 @@ pub struct Vga {
      * this, so retrace and blanking come at the real rate. */
     epoch: Instant,
     /* None when guest RAM does not cover the framebuffer */
-    framebuffer: Option<*const u8>
+    framebuffer: Option<*const u8>,
+    /* None counts every page as written in every frame. */
+    dirty_log: Option<DirtyLog>,
+    /* Frames are counted by render, which notes the frame each page
+     * was last written in. */
+    frame: u64,
+    page_written: [u64; FRAMEBUFFER_PAGES],
+    /* The palette or the display-on bit changed since the last frame. */
+    repaint: bool
 }
 
 /* The framebuffer points into a MemRegion, which outlives the devices
@@ -79,7 +94,7 @@ pub struct Vga {
 unsafe impl Send for Vga {}
 
 impl Vga {
-    pub fn new(framebuffer: Option<*const u8>) -> Arc<Mutex<Self>> {
+    pub fn new(framebuffer: Option<*const u8>, dirty_log: Option<DirtyLog>) -> Arc<Mutex<Self>> {
         Arc::new(Mutex::new(Self {
             misc: 0,
             seq_index: 0,
@@ -96,7 +111,11 @@ impl Vga {
             dac_read: (0, 0),
             dac_reading: false,
             epoch: Instant::now(),
-            framebuffer
+            framebuffer,
+            dirty_log,
+            frame: 0,
+            page_written: [0; FRAMEBUFFER_PAGES],
+            repaint: false
         }))
     }
 
@@ -106,6 +125,7 @@ impl Vga {
                 if self.ac_data_next {
                     self.ac[(self.ac_index & 0x1f) as usize] = byte;
                 } else {
+                    self.repaint |= (self.ac_index ^ byte) & AC_PAS != 0;
                     self.ac_index = byte & 0x3f;
                 }
                 self.ac_data_next = !self.ac_data_next;
@@ -124,6 +144,7 @@ impl Vga {
             DAC_DATA => {
                 let (index, component) = self.dac_write;
                 self.palette[index as usize][component] = byte & 0x3f;
+                self.repaint = true;
                 self.dac_write = if component == 2 { (index.wrapping_add(1), 0) } else { (index, component + 1) };
             },
             GC_INDEX => self.gc_index = byte & 0x0f,
@@ -174,6 +195,29 @@ impl Vga {
         status
     }
 
+    /* Starts a new frame and returns the pages written after frame
+     * `seen`, from the first to the last, or all of them for 0. */
+    fn written_pages(&mut self, seen: u64) -> Option<Range<usize>> {
+        self.frame += 1;
+        /* A failed fetch loses nothing: every page counts as written. */
+        let bitmap = match (&self.framebuffer, &self.dirty_log) {
+            (None, _) => vec![0],
+            (Some(_), Some(log)) => log.fetch().unwrap_or_else(|_| vec![!0]),
+            (Some(_), None) => vec![!0]
+        };
+        for (page, written) in self.page_written.iter_mut().enumerate() {
+            if self.repaint || bitmap[page / 64] >> (page % 64) & 1 != 0 {
+                *written = self.frame;
+            }
+        }
+        self.repaint = false;
+
+        let changed = |written: &u64| seen == 0 || *written > seen;
+        let first = self.page_written.iter().position(changed)?;
+        let last = self.page_written.iter().rposition(changed).unwrap();
+        Some(first..last + 1)
+    }
+
     /* 0x00RRGGBB, each 6-bit component widened to 8 bits */
     fn palette_rgb(&self) -> [u32; 256] {
         let widen = |c: u8| ((c << 2) | (c >> 4)) as u32;
@@ -202,23 +246,29 @@ impl IODevice for Vga {
     }
 }
 
-/* The frontends' threads lock it only to copy the palette, not while
- * reading the framebuffer. */
+/* The frontends' threads lock it to fetch the dirty log and copy the
+ * palette, not while reading the framebuffer. The log is fetched first:
+ * a page written after that is read now and sent again next frame. */
 impl Display for Mutex<Vga> {
     fn size(&self) -> (u16, u16) { (WIDTH as u16, HEIGHT as u16) }
 
-    fn render(&self, out: &mut [u32]) {
-        let (palette, framebuffer) = {
-            let vga = self.lock().unwrap();
-            (vga.palette_rgb(), vga.framebuffer.filter(|_| vga.ac_index & AC_PAS != 0))
+    fn render(&self, out: &mut [u32], seen: &mut u64) -> Option<Range<usize>> {
+        let (pages, palette, framebuffer) = {
+            let mut vga = self.lock().unwrap();
+            let pages = vga.written_pages(*seen);
+            *seen = vga.frame;
+            (pages?, vga.palette_rgb(), vga.framebuffer.filter(|_| vga.ac_index & AC_PAS != 0))
         };
-        let Some(framebuffer) = framebuffer else {
-            out.fill(0);
-            return;
-        };
-        for (i, pixel) in out.iter_mut().enumerate().take(VGA_FRAMEBUFFER_SIZE) {
-            *pixel = palette[read_guest_ptr::<u8>(unsafe { framebuffer.add(i) }) as usize];
+        let page = PAGE_SIZE as usize;
+        let rows = pages.start * page / WIDTH..(pages.end * page).min(VGA_FRAMEBUFFER_SIZE).div_ceil(WIDTH);
+        let pixels = rows.start * WIDTH..rows.end * WIDTH;
+        match framebuffer {
+            None => out[pixels].fill(0),
+            Some(framebuffer) => for i in pixels {
+                out[i] = palette[read_guest_ptr::<u8>(unsafe { framebuffer.add(i) }) as usize];
+            }
         }
+        Some(rows)
     }
 }
 
@@ -231,8 +281,9 @@ mod tests {
         let mut fb = vec![0u8; VGA_FRAMEBUFFER_SIZE];
         fb[0] = 1;
         fb[VGA_FRAMEBUFFER_SIZE - 1] = 2;
-        let vga = Vga::new(Some(fb.as_ptr()));
+        let vga = Vga::new(Some(fb.as_ptr()), None);
         let mut out = vec![0x123456u32; VGA_FRAMEBUFFER_SIZE];
+        let mut seen = 0;
 
         {
             let mut v = vga.lock().unwrap();
@@ -246,7 +297,7 @@ mod tests {
         }
 
         /* Blanked until the display is turned on */
-        vga.render(&mut out);
+        assert_eq!(vga.render(&mut out, &mut seen), Some(0..HEIGHT));
         assert!(out.iter().all(|&p| p == 0));
 
         {
@@ -258,9 +309,31 @@ mod tests {
             v.read(INSTAT_READ);
             v.write(AC_INDEX, AC_PAS);
         }
-        vga.render(&mut out);
+        vga.render(&mut out, &mut seen);
         assert_eq!(out[0], 0xff0082);
         assert_eq!(out[1], 0);
         assert_eq!(out[VGA_FRAMEBUFFER_SIZE - 1], 0x00ff04);
+    }
+
+    #[test]
+    fn written_pages() {
+        let fb = vec![0u8; VGA_FRAMEBUFFER_SIZE];
+        let vga = Vga::new(Some(fb.as_ptr()), None);
+        let mut v = vga.lock().unwrap();
+        /* With no log, every page in every frame */
+        assert_eq!(v.written_pages(0), Some(0..FRAMEBUFFER_PAGES));
+        let seen = v.frame;
+        assert_eq!(v.written_pages(seen), Some(0..FRAMEBUFFER_PAGES));
+
+        /* Without a framebuffer only a repaint changes anything. */
+        let vga = Vga::new(None, None);
+        let mut v = vga.lock().unwrap();
+        assert_eq!(v.written_pages(0), Some(0..FRAMEBUFFER_PAGES));
+        let seen = v.frame;
+        assert_eq!(v.written_pages(seen), None);
+        v.write(DAC_DATA, 0x3f);
+        assert_eq!(v.written_pages(seen), Some(0..FRAMEBUFFER_PAGES));
+        /* A second client still behind sees it too. */
+        assert_eq!(v.written_pages(seen), Some(0..FRAMEBUFFER_PAGES));
     }
 }
