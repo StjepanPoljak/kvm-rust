@@ -41,7 +41,7 @@ RUN set -e;                                                     \
     esac;                                                       \
     rustup target add "$rust_target"
 
-RUN mkdir -p ${HOME}/kvm-rust
-WORKDIR ${HOME}/kvm-rust
+RUN mkdir -p ${HOME}/hearth
+WORKDIR ${HOME}/hearth
 
 CMD [ "/bin/bash" ]

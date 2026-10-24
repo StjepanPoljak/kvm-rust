@@ -13,7 +13,7 @@ if [ ${ARCH} != aarch64 ] && [ ${ARCH} != riscv64 ]; then
 fi
 
 docker run --network host -it --rm \
-       -v "$(pwd)":"/home/docker/kvm-rust" \
+       -v "$(pwd)":"/home/docker/hearth" -w /home/docker/hearth \
        -e RUSTFLAGS="-C target-feature=+crt-static" \
-       ${ARCH}-rust-build \
+       ${ARCH}-hearth-build \
        cargo build --release --target=${ARCH}-unknown-linux-gnu

@@ -16,4 +16,4 @@ docker build --network host     \
        --build-arg GID=$(id -g) \
        --build-arg=UID=$(id -u) \
        --build-arg=ARCH=${ARCH} \
-       -t ${ARCH}-rust-build .
+       -t ${ARCH}-hearth-build .
