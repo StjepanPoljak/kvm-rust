@@ -96,11 +96,3 @@ uint32_t clock_ms(void)
 {
 	return clock_ns() / 1000000;
 }
-
-/* No timer interrupt yet, so spin. */
-void sleep_ms(uint32_t ms)
-{
-	uint64_t until = clock_ns() + (uint64_t)ms * 1000000;
-	while (clock_ns() < until)
-		__asm__ volatile("pause");
-}

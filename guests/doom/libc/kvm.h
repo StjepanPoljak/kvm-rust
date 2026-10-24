@@ -40,6 +40,10 @@ void serial_putc(char c);
 void clock_init(void);
 uint64_t clock_ns(void);
 uint32_t clock_ms(void);
+
+/* IDT, PIC and LAPIC setup (idt.c), after clock_init(); enables
+ * interrupts. sleep_ms() halts on the LAPIC timer. */
+void interrupts_init(void);
 void sleep_ms(uint32_t ms);
 _Noreturn void power_off(int code);
 

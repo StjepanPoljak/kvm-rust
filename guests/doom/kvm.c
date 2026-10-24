@@ -157,6 +157,7 @@ void kmain(uint32_t start_info_paddr)
 	}
 	setup_memory(si);
 	clock_init();
+	interrupts_init();
 
 	/* User options come first: Doom takes the first match of an option,
 	 * so they override the defaults after them. -mb sizes Doom's zone. */
