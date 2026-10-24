@@ -106,12 +106,9 @@ static void setup_memory(const struct hvm_start_info *si)
 
 /* --- doomgeneric */
 
-static uint32_t frames, frames_reported_at;
-
 void DG_Init(void)
 {
 	vga_set_mode_13h();
-	frames_reported_at = clock_ms();
 }
 
 /* Built with CMAP256 and a 320x200 DG_ScreenBuffer, Doom's frame is
@@ -129,14 +126,6 @@ void DG_DrawFrame(void)
 		palette_changed = false;
 	}
 	memcpy(VGA_FRAMEBUFFER, DG_ScreenBuffer, VGA_WIDTH * VGA_HEIGHT);
-
-	uint32_t now = clock_ms();
-	frames++;
-	if (now - frames_reported_at >= 1000) {
-		printf("[kvm] %u frames in %u ms\n", frames, now - frames_reported_at);
-		frames = 0;
-		frames_reported_at = now;
-	}
 }
 
 void DG_SleepMs(uint32_t ms)
