@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "doomgeneric.h"
+#include "i_video.h"
 #include "kvm.h"
 
 #define XEN_HVM_START_MAGIC	0x336ec578
@@ -108,12 +109,26 @@ static uint32_t frames, frames_reported_at;
 
 void DG_Init(void)
 {
+	vga_set_mode_13h();
 	frames_reported_at = clock_ms();
 }
 
-/* No display yet: report the frame rate once a second instead. */
+/* Built with CMAP256 and a 320x200 DG_ScreenBuffer, Doom's frame is
+ * already in mode 13h's format: palette indices, one byte per pixel. */
 void DG_DrawFrame(void)
 {
+	if (palette_changed) {
+		static uint8_t rgb[256][3];
+		for (int i = 0; i < 256; i++) {
+			rgb[i][0] = colors[i].r;
+			rgb[i][1] = colors[i].g;
+			rgb[i][2] = colors[i].b;
+		}
+		vga_set_palette(rgb);
+		palette_changed = false;
+	}
+	memcpy(VGA_FRAMEBUFFER, DG_ScreenBuffer, VGA_WIDTH * VGA_HEIGHT);
+
 	uint32_t now = clock_ms();
 	frames++;
 	if (now - frames_reported_at >= 1000) {

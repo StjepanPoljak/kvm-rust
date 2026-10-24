@@ -32,13 +32,15 @@ DOOM_OBJS := dummy am_map doomdef doomstat dstrings d_event d_items d_iwad \
 	doomgeneric
 LIBC_OBJS := clock ctype stdio stdlib string sys
 
-OBJS := $(BUILD)/boot.o $(BUILD)/isr.o $(BUILD)/idt.o $(BUILD)/kvm.o \
+OBJS := $(BUILD)/boot.o $(BUILD)/isr.o $(BUILD)/idt.o $(BUILD)/vga.o $(BUILD)/kvm.o \
 	$(addprefix $(BUILD)/libc/, $(addsuffix .o, $(LIBC_OBJS))) \
 	$(addprefix $(BUILD)/doom/, $(addsuffix .o, $(DOOM_OBJS)))
 
 # Freestanding: only our libc headers and the compiler's own (stdint.h,
-# stdarg.h, ...). SSE is fine, boot.S enables it.
+# stdarg.h, ...). SSE is fine, boot.S enables it. CMAP256 and 320x200
+# make doomgeneric hand over frames in VGA mode 13h's format.
 CFLAGS := -O2 -g -ffreestanding -nostdinc \
+	-DCMAP256 -DDOOMGENERIC_RESX=320 -DDOOMGENERIC_RESY=200 \
 	-isystem libc/include -isystem $(shell $(CC) -print-file-name=include) \
 	-fno-pie -fno-stack-protector -fno-asynchronous-unwind-tables \
 	-mno-red-zone -mcmodel=small -ffunction-sections -fdata-sections
@@ -58,6 +60,9 @@ $(BUILD)/isr.o: isr.S | $(BUILD)
 
 $(BUILD)/idt.o: idt.c libc/kvm.h | $(BUILD)
 	$(CC) $(CFLAGS) -mgeneral-regs-only -Wall -Wextra -Ilibc -c $< -o $@
+
+$(BUILD)/vga.o: vga.c libc/kvm.h | $(BUILD)
+	$(CC) $(CFLAGS) -Wall -Wextra -Ilibc -c $< -o $@
 
 $(BUILD)/kvm.o: kvm.c libc/kvm.h $(SRC)/doomgeneric.h | $(BUILD)
 	$(CC) $(CFLAGS) -Wall -Wextra -Ilibc -I$(SRC) -c $< -o $@

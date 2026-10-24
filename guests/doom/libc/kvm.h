@@ -47,6 +47,13 @@ void interrupts_init(void);
 void sleep_ms(uint32_t ms);
 _Noreturn void power_off(int code);
 
+/* VGA mode 13h (vga.c). */
+#define VGA_WIDTH	320
+#define VGA_HEIGHT	200
+#define VGA_FRAMEBUFFER	((uint8_t *)0xa0000)
+void vga_set_mode_13h(void);
+void vga_set_palette(const uint8_t rgb[256][3]);
+
 /* The heap is [start, end); the platform calls this before any malloc. */
 void heap_init(uintptr_t start, uintptr_t end);
 /* Makes `data` readable through fopen(name); the name is matched against
