@@ -5,7 +5,10 @@
  *
  * Every client gets two threads: one parses its messages, the other
  * sends framebuffer updates when the client has asked for one and the
- * Display says rows have changed, polling it at UPDATE_INTERVAL.
+ * Display says rows have changed, polling it at UPDATE_INTERVAL. That is
+ * also the most often it renders: clients ask for the next update as
+ * soon as they have one, and would otherwise get frames as fast as the
+ * guest draws them, each taking CPU time from it.
  * Updates use the Raw encoding and cover the rows that changed.
  */
 
@@ -14,7 +17,7 @@ use std::net::{ TcpListener, TcpStream, ToSocketAddrs };
 use std::ops::Range;
 use std::sync::{ Arc, Mutex };
 use std::sync::mpsc::{ self, Receiver, RecvTimeoutError, Sender };
-use std::time::Duration;
+use std::time::{ Duration, Instant };
 
 const UPDATE_INTERVAL: Duration = Duration::from_millis(1000 / 60);
 const DESKTOP_NAME: &[u8] = b"Hearth";
@@ -289,9 +292,11 @@ fn send_updates(mut stream: TcpStream, display: Arc<dyn Display>, width: u16, he
     let mut seen = 0;
     let mut pending = false;
     let mut out = Vec::new();
+    let mut next_render = Instant::now();
 
     loop {
-        match rx.recv_timeout(UPDATE_INTERVAL) {
+        let wait = if pending { next_render.saturating_duration_since(Instant::now()) } else { UPDATE_INTERVAL };
+        match rx.recv_timeout(wait) {
             Ok(Request::PixelFormat(f)) => {
                 format = f;
                 /* Pixels already sent were in the old format. */
@@ -307,11 +312,12 @@ fn send_updates(mut stream: TcpStream, display: Arc<dyn Display>, width: u16, he
             Err(RecvTimeoutError::Timeout) => (),
             Err(RecvTimeoutError::Disconnected) => return Ok(())
         }
-        if !pending {
+        if !pending || Instant::now() < next_render {
             continue;
         }
 
         /* An incremental request waits until something changes. */
+        next_render = Instant::now() + UPDATE_INTERVAL;
         let Some(Range { start: first, end: last }) = display.render(&mut frame, &mut seen) else { continue };
 
         out.clear();
@@ -421,6 +427,7 @@ mod tests {
 
         /* Full update in the default format: 0x00RRGGBB little-endian. */
         client.write_all(&[MSG_SET_ENCODINGS, 0, 0, 1, 0, 0, 0, 0]).unwrap();
+        let asked = Instant::now();
         client.write_all(&[MSG_FRAMEBUFFER_UPDATE_REQUEST, 0, 0, 0, 0, 0, 0, 4, 0, 2]).unwrap();
         let (rect, pixels) = read_update(&mut client, 4);
         assert_eq!(rect, [0, 0, 4, 2]);
@@ -440,6 +447,8 @@ mod tests {
         let (rect, pixels) = read_update(&mut client, 2);
         assert_eq!(rect, [0, 0, 4, 2]);
         assert_eq!(&pixels[..8], &[0xf8, 0x00, 0x07, 0xe0, 0x00, 0x1f, 0xff, 0xff]);
+        /* Asked for at once, but no sooner than the update rate allows */
+        assert!(asked.elapsed() >= UPDATE_INTERVAL);
 
         display.set(0, 0);
         client.write_all(&[MSG_FRAMEBUFFER_UPDATE_REQUEST, 1, 0, 0, 0, 0, 0, 4, 0, 2]).unwrap();
