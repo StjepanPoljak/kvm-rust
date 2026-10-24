@@ -17,7 +17,7 @@ use std::io::{ self, Read };
 use libc::{ _IOW, _IO };
 use std::collections::HashMap;
 use std::sync::{ Arc,Mutex };
-use std::sync::atomic::{ AtomicBool, AtomicI32, Ordering };
+use std::sync::atomic::{ AtomicBool, Ordering };
 use std::cell::Cell;
 
 type MMIO = kvm_run__bindgen_ty_1__bindgen_ty_6;
@@ -44,7 +44,6 @@ thread_local! {
 /* Per-VM state shared by its vcpu threads and device threads. */
 pub struct VmControl {
     should_stop: AtomicBool,
-    exit_code: AtomicI32,
     devices_pending: AtomicBool,
     /* Threads currently in VCPU::run(), the targets of kick_signal(). */
     vcpu_threads: Mutex<Vec<libc::pthread_t>>
@@ -54,7 +53,6 @@ impl VmControl {
     fn new() -> Self {
         Self {
             should_stop: AtomicBool::new(false),
-            exit_code: AtomicI32::new(0),
             devices_pending: AtomicBool::new(false),
             vcpu_threads: Mutex::new(vec![])
         }
@@ -66,16 +64,6 @@ impl VmControl {
         for tid in self.vcpu_threads.lock().unwrap().iter() {
             unsafe { libc::pthread_kill(*tid, kick_signal()); }
         }
-    }
-
-    /* The guest asked to be switched off; `code` becomes the VMM's exit code. */
-    pub fn power_off(&self, code: i32) {
-        self.exit_code.store(code, Ordering::SeqCst);
-        self.stop();
-    }
-
-    fn exit_code(&self) -> i32 {
-        self.exit_code.load(Ordering::SeqCst)
     }
 
     /* Called from device threads: makes a vcpu thread poll the MMIO devices. */
@@ -580,11 +568,9 @@ fn main() -> io::Result<()> {
     vm.init_mmio_devices(&args)?;
     vm.init_io_devices()?;
 
-    let control = vm.control.clone();
     let res = vm.run(vec![vcpu]);
     if let Some(tty) = saved_tty {
         restore_tty(&tty);
     }
-    res?;
-    std::process::exit(control.exit_code())
+    res
 }

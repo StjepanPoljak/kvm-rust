@@ -3,7 +3,6 @@ use crate::{ VM, IO, IODevice, KVMIO, TTY, VmControl, start_tty, kvm_irq_level, 
 use std::sync::{ Arc, Mutex };
 use libc::_IOW;
 use std::collections::VecDeque;
-use super::paravirt::{ Paravirt, PV_PORT_FIRST, PV_PORT_LAST };
 
 const KVM_IRQ_LINE: libc::Ioctl = _IOW::<kvm_irq_level>(KVMIO, 0x61);
 
@@ -130,7 +129,6 @@ impl IODevice for UART {
 #[repr(u64)]
 pub enum DeviceId {
     Uart = 0u64,
-    Paravirt = 1u64,
     Unknown = !(0u64)
 }
 
@@ -138,15 +136,12 @@ impl VM {
     pub fn arch_init_io_devices(&mut self) -> io::Result<()> {
         let uart = UART::new(self.fd, self.control.clone())?;
         self.io_devices.insert(DeviceId::Uart as u64, uart.clone() as Arc<Mutex<dyn IODevice>>);
-        let paravirt = Arc::new(Mutex::new(Paravirt::new(self.control.clone())));
-        self.io_devices.insert(DeviceId::Paravirt as u64, paravirt as Arc<Mutex<dyn IODevice>>);
         Ok(())
     }
 
     pub fn arch_handle_io(&self, io: &IO, base: *mut u8) -> io::Result<()> {
         let dev: DeviceId = match io.port {
             0x3f8..=0x3ff => DeviceId::Uart,
-            PV_PORT_FIRST..=PV_PORT_LAST => DeviceId::Paravirt,
             _ => DeviceId::Unknown
         };
         if let Some(device) = self.io_devices.get(&(dev as u64)) {
