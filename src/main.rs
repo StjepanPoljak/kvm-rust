@@ -139,7 +139,12 @@ pub struct Args {
 
     /// Extra kernel command line arguments (x86; on aarch64 the DTB has them)
     #[arg(long, allow_hyphen_values = true)]
-    append: Option<String>
+    append: Option<String>,
+
+    /// Serve the display and keyboard to VNC clients on this address,
+    /// e.g. 127.0.0.1:5900. No authentication: keep it local or tunnel it.
+    #[arg(long)]
+    vnc: Option<String>
 }
 
 /* Returns the size in bytes. */
@@ -194,6 +199,8 @@ impl KvmDev {
             guest_memory: GuestMemory::new(),
             mmio_devices: MMIODevices::new(),
             io_devices: IODevices::new(),
+            display: None,
+            keyboard: None,
             control: Arc::new(VmControl::new()) })
     }
 
@@ -211,6 +218,9 @@ pub struct VM {
     pub guest_memory: GuestMemory,
     pub mmio_devices: MMIODevices,
     pub io_devices: IODevices,
+    /* Set by the devices that provide them, for frontends such as RFB. */
+    pub display: Option<Arc<dyn Display>>,
+    pub keyboard: Option<Arc<Mutex<dyn Keyboard>>>,
     pub control: Arc<VmControl>
 }
 
@@ -567,6 +577,9 @@ fn main() -> io::Result<()> {
 
     vm.init_mmio_devices(&args)?;
     vm.init_io_devices()?;
+    if let Some(addr) = &args.vnc {
+        start_rfb(addr.as_str(), vm.display.clone(), vm.keyboard.clone())?;
+    }
 
     let res = vm.run(vec![vcpu]);
     if let Some(tty) = saved_tty {

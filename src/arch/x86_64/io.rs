@@ -3,6 +3,7 @@ use crate::{ VM, IO, IODevice, KVMIO, TTY, VmControl, start_tty, kvm_irq_level, 
 use std::sync::{ Arc, Mutex };
 use libc::_IOW;
 use std::collections::VecDeque;
+use super::i8042::{ I8042, I8042_DATA, I8042_COMMAND };
 
 const KVM_IRQ_LINE: libc::Ioctl = _IOW::<kvm_irq_level>(KVMIO, 0x61);
 
@@ -129,6 +130,7 @@ impl IODevice for UART {
 #[repr(u64)]
 pub enum DeviceId {
     Uart = 0u64,
+    I8042 = 1u64,
     Unknown = !(0u64)
 }
 
@@ -136,12 +138,16 @@ impl VM {
     pub fn arch_init_io_devices(&mut self) -> io::Result<()> {
         let uart = UART::new(self.fd, self.control.clone())?;
         self.io_devices.insert(DeviceId::Uart as u64, uart.clone() as Arc<Mutex<dyn IODevice>>);
+        let i8042 = I8042::new(self.fd, self.control.clone());
+        self.io_devices.insert(DeviceId::I8042 as u64, i8042.clone() as Arc<Mutex<dyn IODevice>>);
+        self.keyboard = Some(i8042);
         Ok(())
     }
 
     pub fn arch_handle_io(&self, io: &IO, base: *mut u8) -> io::Result<()> {
         let dev: DeviceId = match io.port {
             0x3f8..=0x3ff => DeviceId::Uart,
+            I8042_DATA | I8042_COMMAND => DeviceId::I8042,
             _ => DeviceId::Unknown
         };
         if let Some(device) = self.io_devices.get(&(dev as u64)) {

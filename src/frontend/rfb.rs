@@ -1,6 +1,6 @@
 /*
  * RFB ("VNC") server, RFC 6143: shows a Display to any VNC client and
- * passes the client's keys back. No authentication or encryption, so
+ * passes the client's keys to a Keyboard. No authentication or encryption, so
  * listen on localhost and tunnel over SSH, or on a private network.
  *
  * Every client gets two threads: one parses its messages, the other
@@ -11,12 +11,14 @@
 
 use std::io::{ self, Read, Write };
 use std::net::{ TcpListener, TcpStream, ToSocketAddrs };
-use std::sync::Arc;
+use std::sync::{ Arc, Mutex };
 use std::sync::mpsc::{ self, Receiver, RecvTimeoutError, Sender };
 use std::time::Duration;
 
 const UPDATE_INTERVAL: Duration = Duration::from_millis(1000 / 60);
 const DESKTOP_NAME: &[u8] = b"KVM Rust";
+/* Shown, in black, while the VM has no display device. */
+const NO_DISPLAY_SIZE: (u16, u16) = (320, 200);
 
 const SECURITY_NONE: u8 = 1;
 const ENCODING_RAW: i32 = 0;
@@ -29,14 +31,25 @@ const MSG_POINTER_EVENT: u8 = 5;
 const MSG_CLIENT_CUT_TEXT: u8 = 6;
 const MSG_FRAMEBUFFER_UPDATE: u8 = 0;
 
-/* What a VNC client sees and types into, e.g. a VGA adapter. */
+/* What a VNC client sees, e.g. a VGA adapter. */
 pub trait Display: Send + Sync {
     /* Width and height in pixels; read once per client. */
     fn size(&self) -> (u16, u16);
     /* Fills `out` (width * height) with the current frame as 0x00RRGGBB. */
     fn render(&self, out: &mut [u32]);
+}
+
+/* What a VNC client types into, e.g. a PS/2 keyboard. */
+pub trait Keyboard: Send {
     /* An X11 keysym went down or up. */
-    fn key_event(&self, _down: bool, _keysym: u32) {}
+    fn key_event(&mut self, down: bool, keysym: u32) -> io::Result<()>;
+}
+
+struct NoDisplay;
+
+impl Display for NoDisplay {
+    fn size(&self) -> (u16, u16) { NO_DISPLAY_SIZE }
+    fn render(&self, out: &mut [u32]) { out.fill(0); }
 }
 
 #[derive(Clone, Copy)]
@@ -112,16 +125,19 @@ enum Request {
     Update { incremental: bool }
 }
 
-pub fn start_rfb(addr: impl ToSocketAddrs, display: Arc<dyn Display>) -> io::Result<()> {
+pub fn start_rfb(addr: impl ToSocketAddrs, display: Option<Arc<dyn Display>>,
+                 keyboard: Option<Arc<Mutex<dyn Keyboard>>>) -> io::Result<()> {
+    let display = display.unwrap_or_else(|| Arc::new(NoDisplay));
     let listener = TcpListener::bind(addr)?;
     println!("RFB server on {}\r", listener.local_addr()?);
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
             let display = display.clone();
+            let keyboard = keyboard.clone();
             std::thread::spawn(move || {
                 let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
-                match serve(stream, display) {
+                match serve(stream, display, keyboard) {
                     Ok(()) => println!("RFB client {} disconnected\r", peer),
                     Err(e) => println!("RFB client {}: {}\r", peer, e)
                 }
@@ -131,7 +147,8 @@ pub fn start_rfb(addr: impl ToSocketAddrs, display: Arc<dyn Display>) -> io::Res
     Ok(())
 }
 
-fn serve(mut stream: TcpStream, display: Arc<dyn Display>) -> io::Result<()> {
+fn serve(mut stream: TcpStream, display: Arc<dyn Display>,
+         keyboard: Option<Arc<Mutex<dyn Keyboard>>>) -> io::Result<()> {
     stream.set_nodelay(true)?;
     handshake(&mut stream)?;
 
@@ -148,10 +165,9 @@ fn serve(mut stream: TcpStream, display: Arc<dyn Display>) -> io::Result<()> {
 
     let (tx, rx) = mpsc::channel();
     let writer = stream.try_clone()?;
-    let updates_display = display.clone();
-    let updates = std::thread::spawn(move || send_updates(writer, updates_display, width, height, rx));
+    let updates = std::thread::spawn(move || send_updates(writer, display, width, height, rx));
 
-    let res = read_messages(&mut stream, display.as_ref(), tx);
+    let res = read_messages(&mut stream, keyboard.as_deref(), tx);
     /* Unblocks the update thread if it is the one still running. */
     let _ = stream.shutdown(std::net::Shutdown::Both);
     let _ = updates.join();
@@ -191,7 +207,8 @@ fn handshake(stream: &mut TcpStream) -> io::Result<()> {
     Ok(())
 }
 
-fn read_messages(stream: &mut TcpStream, display: &dyn Display, tx: Sender<Request>) -> io::Result<()> {
+fn read_messages(stream: &mut TcpStream, keyboard: Option<&Mutex<dyn Keyboard>>,
+                 tx: Sender<Request>) -> io::Result<()> {
     let invalid = |msg: &str| io::Error::new(io::ErrorKind::InvalidData, msg.to_string());
     loop {
         let mut kind = [0u8; 1];
@@ -225,7 +242,9 @@ fn read_messages(stream: &mut TcpStream, display: &dyn Display, tx: Sender<Reque
             MSG_KEY_EVENT => {
                 let mut b = [0u8; 7];
                 stream.read_exact(&mut b)?;
-                display.key_event(b[0] != 0, u32::from_be_bytes([b[3], b[4], b[5], b[6]]));
+                if let Some(keyboard) = keyboard {
+                    keyboard.lock().unwrap().key_event(b[0] != 0, u32::from_be_bytes([b[3], b[4], b[5], b[6]]))?;
+                }
                 None
             },
             MSG_POINTER_EVENT => {
@@ -326,14 +345,21 @@ mod tests {
     /* 4x2: red, green, blue, white over four greys; the first pixel
      * turns black after the first update. */
     struct Pattern {
-        frame: Mutex<Vec<u32>>,
-        keys: Mutex<Vec<(bool, u32)>>
+        frame: Mutex<Vec<u32>>
     }
 
     impl Display for Pattern {
         fn size(&self) -> (u16, u16) { (4, 2) }
         fn render(&self, out: &mut [u32]) { out.copy_from_slice(&self.frame.lock().unwrap()); }
-        fn key_event(&self, down: bool, keysym: u32) { self.keys.lock().unwrap().push((down, keysym)); }
+    }
+
+    struct Keys(Vec<(bool, u32)>);
+
+    impl Keyboard for Keys {
+        fn key_event(&mut self, down: bool, keysym: u32) -> io::Result<()> {
+            self.0.push((down, keysym));
+            Ok(())
+        }
     }
 
     fn read_update(client: &mut TcpStream, bytes_per_pixel: usize) -> ([u16; 4], Vec<u8>) {
@@ -351,13 +377,13 @@ mod tests {
     fn session() {
         let display = Arc::new(Pattern {
             frame: Mutex::new(vec![0xff0000, 0x00ff00, 0x0000ff, 0xffffff,
-                                   0x101010, 0x202020, 0x303030, 0x404040]),
-            keys: Mutex::new(vec![])
+                                   0x101010, 0x202020, 0x303030, 0x404040])
         });
+        let keys = Arc::new(Mutex::new(Keys(vec![])));
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         drop(listener);
-        start_rfb(addr, display.clone()).unwrap();
+        start_rfb(addr, Some(display.clone()), Some(keys.clone())).unwrap();
         let mut client = TcpStream::connect(addr).unwrap();
 
         let mut version = [0u8; 12];
@@ -414,6 +440,6 @@ mod tests {
         client.write_all(&[MSG_KEY_EVENT, 0, 0, 0, 0, 0, 0, 0x61]).unwrap();
         client.write_all(&[MSG_FRAMEBUFFER_UPDATE_REQUEST, 0, 0, 0, 0, 0, 0, 4, 0, 2]).unwrap();
         read_update(&mut client, 2);
-        assert_eq!(*display.keys.lock().unwrap(), vec![(true, 0x61), (false, 0x61)]);
+        assert_eq!(keys.lock().unwrap().0, vec![(true, 0x61), (false, 0x61)]);
     }
 }
