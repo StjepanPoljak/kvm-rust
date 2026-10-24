@@ -17,7 +17,7 @@ use std::io::{ self, Read };
 use libc::{ _IOW, _IO };
 use std::collections::HashMap;
 use std::sync::{ Arc,Mutex };
-use std::sync::atomic::{ AtomicBool, Ordering };
+use std::sync::atomic::{ AtomicBool, AtomicI32, Ordering };
 use std::cell::Cell;
 
 type MMIO = kvm_run__bindgen_ty_1__bindgen_ty_6;
@@ -44,6 +44,7 @@ thread_local! {
 /* Per-VM state shared by its vcpu threads and device threads. */
 pub struct VmControl {
     should_stop: AtomicBool,
+    exit_code: AtomicI32,
     devices_pending: AtomicBool,
     /* Threads currently in VCPU::run(), the targets of kick_signal(). */
     vcpu_threads: Mutex<Vec<libc::pthread_t>>
@@ -53,6 +54,7 @@ impl VmControl {
     fn new() -> Self {
         Self {
             should_stop: AtomicBool::new(false),
+            exit_code: AtomicI32::new(0),
             devices_pending: AtomicBool::new(false),
             vcpu_threads: Mutex::new(vec![])
         }
@@ -64,6 +66,16 @@ impl VmControl {
         for tid in self.vcpu_threads.lock().unwrap().iter() {
             unsafe { libc::pthread_kill(*tid, kick_signal()); }
         }
+    }
+
+    /* The guest asked to be switched off; `code` becomes the VMM's exit code. */
+    pub fn power_off(&self, code: i32) {
+        self.exit_code.store(code, Ordering::SeqCst);
+        self.stop();
+    }
+
+    fn exit_code(&self) -> i32 {
+        self.exit_code.load(Ordering::SeqCst)
     }
 
     /* Called from device threads: makes a vcpu thread poll the MMIO devices. */
@@ -108,8 +120,8 @@ pub struct Args {
     #[arg(short, long)]
     binary: Option<String>,
 
-    /// vmlinux or Image to run
-    #[arg(long)]
+    /// Kernel to boot: a vmlinux or other PVH ELF on x86, an Image on aarch64
+    #[arg(long, alias = "kernel")]
     linux: Option<String>,
 
     /// Memory size: a number with a K, M or G suffix; a plain number is
@@ -125,7 +137,7 @@ pub struct Args {
     #[arg(long)]
     dtb: Option<String>,
 
-    /// Initramfs path
+    /// Initramfs, or on x86 any file to pass as a PVH module
     #[arg(long)]
     initramfs: Option<String>,
 
@@ -138,7 +150,7 @@ pub struct Args {
     tap: Option<String>,
 
     /// Extra kernel command line arguments (x86; on aarch64 the DTB has them)
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     append: Option<String>
 }
 
@@ -561,8 +573,18 @@ fn main() -> io::Result<()> {
         vm.load_file_to_memory(mem_region_idx, binary, args.load_addr)?;
     }
 
+    /* The serial frontend's thread may never get to restore the terminal
+     * when the guest stops the VM, so main restores it. */
+    let saved_tty = save_tty();
+
     vm.init_mmio_devices(&args)?;
     vm.init_io_devices()?;
 
-    vm.run(vec![vcpu])
+    let control = vm.control.clone();
+    let res = vm.run(vec![vcpu]);
+    if let Some(tty) = saved_tty {
+        restore_tty(&tty);
+    }
+    res?;
+    std::process::exit(control.exit_code())
 }

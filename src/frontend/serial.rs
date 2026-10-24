@@ -8,6 +8,15 @@ pub trait TTY: Send {
     fn send_char(&mut self, ch: u8) -> io::Result<()>;
 }
 
+pub fn save_tty() -> Option<libc::termios> {
+    let mut tty: libc::termios = unsafe { std::mem::zeroed() };
+    (unsafe { libc::tcgetattr(libc::STDIN_FILENO, &mut tty) } == 0).then_some(tty)
+}
+
+pub fn restore_tty(tty: &libc::termios) {
+    unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, tty); }
+}
+
 pub fn start_tty(uart_async: Arc<Mutex<dyn TTY>>, control: Arc<VmControl>) {
     std::thread::spawn(move || {
         let mut is_escape = false;

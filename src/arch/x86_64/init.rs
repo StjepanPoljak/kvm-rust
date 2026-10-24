@@ -142,7 +142,11 @@ impl VM {
 
         match &args.initramfs {
             Some(initramfs_path) => {
-                let initrd_cmdline = "\0";
+                /* The module's command line carries its file name, for guests
+                 * that look modules up by name; Linux ignores it. */
+                let module_name = std::path::Path::new(initramfs_path)
+                    .file_name().map_or(String::new(), |name| name.to_string_lossy().into_owned());
+                let initrd_cmdline = format!("{}\0", module_name);
                 let initrd_cmdline_start = (last_addr + 0xfff) & !0xfff;
                 self.load_data_to_memory(linux_mem_idx, initrd_cmdline.as_bytes().to_vec(), initrd_cmdline_start)?;
 
