@@ -43,8 +43,16 @@ uint32_t clock_ms(void);
 
 /* IDT, PIC and LAPIC setup (idt.c), after clock_init(); enables
  * interrupts. sleep_ms() halts on the LAPIC timer. */
+#define VECTOR_TIMER	0x30
+#define VECTOR_KEYBOARD	0x31
 void interrupts_init(void);
+void ioapic_route(int irq, int vector);
 void sleep_ms(uint32_t ms);
+
+/* PS/2 keyboard (keyboard.c): set 1 scancodes, one byte at a time. */
+void keyboard_init(void);
+void keyboard_interrupt(void);
+int keyboard_read(uint8_t *scancode);
 _Noreturn void power_off(int code);
 
 /* VGA mode 13h (vga.c). */

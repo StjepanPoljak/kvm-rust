@@ -1,7 +1,8 @@
 /*
- * Interrupts: an IDT with the CPU exceptions and the LAPIC timer, the
- * legacy PIC remapped out of the way of the exceptions and masked, and a
- * one-shot LAPIC timer that sleep_ms() halts on. The KVM in-kernel LAPIC
+ * Interrupts: an IDT with the CPU exceptions, the LAPIC timer and the
+ * keyboard, the legacy PIC remapped out of the way of the exceptions and
+ * masked, the IOAPIC for device interrupts, and a one-shot LAPIC timer
+ * that sleep_ms() halts on. The KVM in-kernel LAPIC
  * runs the timer, so a sleeping guest costs the host nothing.
  *
  * Built with -mgeneral-regs-only: the stubs in isr.S do not save the SSE
@@ -15,7 +16,6 @@
 #define IDT_INTERRUPT_GATE	0x8e	/* present, ring 0, 64-bit interrupt gate */
 
 #define VECTOR_PIC_BASE		0x20	/* 16 vectors, all masked */
-#define VECTOR_TIMER		0x30
 #define VECTOR_SPURIOUS		0xff
 
 #define PIC1_CMD		0x20
@@ -27,6 +27,7 @@
 #define APIC_BASE_ENABLE	(1 << 11)
 #define APIC_BASE_MASK		0xfffff000ULL
 
+#define LAPIC_ID		0x020
 #define LAPIC_TPR		0x080
 #define LAPIC_EOI		0x0b0
 #define LAPIC_SVR		0x0f0
@@ -40,6 +41,12 @@
 #define LAPIC_TIMER_DIVIDE_1	0xb
 
 #define CALIBRATE_MS		10
+
+/* Its pins start out masked; KVM's has 24. */
+#define IOAPIC_BASE		0xfec00000
+#define IOAPIC_REGSEL		0x00
+#define IOAPIC_WINDOW		0x10
+#define IOAPIC_REDTBL(pin)	(0x10 + 2 * (pin))
 
 struct idt_entry {
 	uint16_t offset_low;
@@ -60,7 +67,7 @@ struct interrupt_frame {
 };
 
 extern const uint64_t isr_exceptions[32];
-extern char isr_timer[], isr_spurious[];
+extern char isr_timer[], isr_keyboard[], isr_spurious[];
 
 static struct idt_entry idt[256] __attribute__((aligned(16)));
 static volatile uint32_t *lapic;
@@ -107,6 +114,11 @@ void interrupt_dispatch(struct interrupt_frame *frame)
 {
 	if (frame->vector == VECTOR_TIMER) {
 		timer_fired = 1;
+		lapic_write(LAPIC_EOI, 0);
+		return;
+	}
+	if (frame->vector == VECTOR_KEYBOARD) {
+		keyboard_interrupt();
 		lapic_write(LAPIC_EOI, 0);
 		return;
 	}
@@ -162,6 +174,7 @@ void interrupts_init(void)
 	for (int v = 0; v < 32; v++)
 		idt_set(v, isr_exceptions[v]);
 	idt_set(VECTOR_TIMER, (uintptr_t)isr_timer);
+	idt_set(VECTOR_KEYBOARD, (uintptr_t)isr_keyboard);
 	idt_set(VECTOR_SPURIOUS, (uintptr_t)isr_spurious);
 
 	struct { uint16_t limit; uint64_t base; } __attribute__((packed)) idtr = {
@@ -186,6 +199,23 @@ void interrupts_init(void)
 	/* One-shot (mode bits 0), unmasked. */
 	lapic_write(LAPIC_LVT_TIMER, VECTOR_TIMER);
 	__asm__ volatile("sti");
+}
+
+static void ioapic_write(uint32_t reg, uint32_t val)
+{
+	volatile uint32_t *ioapic = (volatile uint32_t *)IOAPIC_BASE;
+	ioapic[IOAPIC_REGSEL / 4] = reg;
+	ioapic[IOAPIC_WINDOW / 4] = val;
+}
+
+/* ISA IRQs map to the same IOAPIC pin (no source overrides here except
+ * IRQ 0) and are edge-triggered, active high: the low word's zero
+ * fields. Delivered to this CPU's LAPIC. */
+void ioapic_route(int irq, int vector)
+{
+	uint32_t apic_id = lapic_read(LAPIC_ID) >> 24;
+	ioapic_write(IOAPIC_REDTBL(irq) + 1, apic_id << 24);
+	ioapic_write(IOAPIC_REDTBL(irq), vector);
 }
 
 /* Arms the one-shot timer and halts until it fires. Checking the flag

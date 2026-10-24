@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "doomgeneric.h"
+#include "doomkeys.h"
 #include "i_video.h"
 #include "kvm.h"
 
@@ -148,11 +149,69 @@ uint32_t DG_GetTicksMs(void)
 	return clock_ms();
 }
 
-/* No keyboard yet. */
+/* Scancode set 1 to Doom keys: letters and digits as lowercase ASCII,
+ * the rest as doomkeys.h names them. Ctrl fires and space uses, as in
+ * the other doomgeneric ports; keypad arrows work as arrows. */
+static const unsigned char set1_to_doom[0x59] = {
+	[0x01] = KEY_ESCAPE,
+	[0x02] = '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=',
+	[0x0e] = KEY_BACKSPACE, KEY_TAB,
+	[0x10] = 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']',
+	[0x1c] = KEY_ENTER, KEY_FIRE,
+	[0x1e] = 'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`',
+	[0x2a] = KEY_RSHIFT, '\\',
+	[0x2c] = 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/',
+	[0x36] = KEY_RSHIFT,
+	[0x38] = KEY_LALT, KEY_USE, KEY_CAPSLOCK,
+	[0x3b] = KEY_F1, KEY_F2, KEY_F3, KEY_F4, KEY_F5, KEY_F6, KEY_F7, KEY_F8, KEY_F9, KEY_F10,
+	[0x48] = KEY_UPARROW,
+	[0x4b] = KEY_LEFTARROW,
+	[0x4d] = KEY_RIGHTARROW,
+	[0x50] = KEY_DOWNARROW,
+	[0x57] = KEY_F11, KEY_F12,
+};
+
+/* After an 0xe0 prefix */
+static unsigned char set1_extended_to_doom(uint8_t code)
+{
+	switch (code) {
+	case 0x1c: return KEY_ENTER;	/* keypad Enter */
+	case 0x1d: return KEY_FIRE;	/* right Ctrl */
+	case 0x38: return KEY_RALT;
+	case 0x47: return KEY_HOME;
+	case 0x48: return KEY_UPARROW;
+	case 0x49: return KEY_PGUP;
+	case 0x4b: return KEY_LEFTARROW;
+	case 0x4d: return KEY_RIGHTARROW;
+	case 0x4f: return KEY_END;
+	case 0x50: return KEY_DOWNARROW;
+	case 0x51: return KEY_PGDN;
+	case 0x52: return KEY_INS;
+	case 0x53: return KEY_DEL;
+	default: return 0;
+	}
+}
+
 int DG_GetKey(int *pressed, unsigned char *key)
 {
-	(void)pressed;
-	(void)key;
+	static int extended;
+	uint8_t scancode;
+
+	while (keyboard_read(&scancode)) {
+		if (scancode == 0xe0) {
+			extended = 1;
+			continue;
+		}
+		uint8_t code = scancode & 0x7f;
+		unsigned char doom_key = extended ? set1_extended_to_doom(code) :
+			code < sizeof(set1_to_doom) ? set1_to_doom[code] : 0;
+		extended = 0;
+		if (!doom_key)
+			continue;
+		*pressed = !(scancode & 0x80);
+		*key = doom_key;
+		return 1;
+	}
 	return 0;
 }
 
@@ -173,6 +232,7 @@ void kmain(uint32_t start_info_paddr)
 	setup_memory(si);
 	clock_init();
 	interrupts_init();
+	keyboard_init();
 
 	/* User options come first: Doom takes the first match of an option,
 	 * so they override the defaults after them. -mb sizes Doom's zone. */

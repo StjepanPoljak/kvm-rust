@@ -32,7 +32,7 @@ DOOM_OBJS := dummy am_map doomdef doomstat dstrings d_event d_items d_iwad \
 	doomgeneric
 LIBC_OBJS := clock ctype stdio stdlib string sys
 
-OBJS := $(BUILD)/boot.o $(BUILD)/isr.o $(BUILD)/idt.o $(BUILD)/vga.o $(BUILD)/kvm.o \
+OBJS := $(BUILD)/boot.o $(BUILD)/isr.o $(BUILD)/idt.o $(BUILD)/keyboard.o $(BUILD)/vga.o $(BUILD)/kvm.o \
 	$(addprefix $(BUILD)/libc/, $(addsuffix .o, $(LIBC_OBJS))) \
 	$(addprefix $(BUILD)/doom/, $(addsuffix .o, $(DOOM_OBJS)))
 
@@ -58,7 +58,8 @@ $(BUILD)/boot.o: boot.S | $(BUILD)
 $(BUILD)/isr.o: isr.S | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD)/idt.o: idt.c libc/kvm.h | $(BUILD)
+# These run in interrupt handlers, which do not save the SSE registers.
+$(BUILD)/idt.o $(BUILD)/keyboard.o: $(BUILD)/%.o: %.c libc/kvm.h | $(BUILD)
 	$(CC) $(CFLAGS) -mgeneral-regs-only -Wall -Wextra -Ilibc -c $< -o $@
 
 $(BUILD)/vga.o: vga.c libc/kvm.h | $(BUILD)

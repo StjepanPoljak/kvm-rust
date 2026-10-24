@@ -48,11 +48,17 @@ isr_\vector:
 	isr	30, 1
 	isr	31
 
-	/* VECTOR_TIMER in idt.c */
+	/* VECTOR_TIMER and VECTOR_KEYBOARD in kvm.h */
 	.global	isr_timer
 isr_timer:
 	pushq	$0
 	pushq	$0x30
+	jmp	isr_common
+
+	.global	isr_keyboard
+isr_keyboard:
+	pushq	$0
+	pushq	$0x31
 	jmp	isr_common
 
 /* 5 words pushed by the CPU + 2 by the stub + 15 here keep %rsp 16-byte
