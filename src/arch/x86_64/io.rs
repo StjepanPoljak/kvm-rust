@@ -148,7 +148,11 @@ impl VM {
             Some(_) => Some(self.log_dirty_pages(VGA_FRAMEBUFFER, VGA_FRAMEBUFFER_SIZE)?),
             None => None
         };
-        let vga = Vga::new(framebuffer.map(|p| p as *const u8), dirty_log);
+        let region = framebuffer.and_then(|_| self.guest_memory.iter()
+            .find(|r| r.guest_phys_addr <= VGA_FRAMEBUFFER
+                && VGA_FRAMEBUFFER + VGA_FRAMEBUFFER_SIZE as u64 <= r.guest_phys_addr + r.mem_size as u64)
+            .cloned());
+        let vga = Vga::new(framebuffer.map(|p| p as *const u8), region, dirty_log);
         self.io_devices.insert(DeviceId::Vga as u64, vga.clone() as Arc<Mutex<dyn IODevice>>);
         self.display = Some(vga);
         Ok(())

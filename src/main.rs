@@ -24,7 +24,9 @@ type MMIO = kvm_run__bindgen_ty_1__bindgen_ty_6;
 type IO = kvm_run__bindgen_ty_1__bindgen_ty_4;
 type MMIODevices = HashMap::<u64, Arc<Mutex<dyn MMIODevice>>>;
 type IODevices = HashMap::<u64, Arc<Mutex<dyn IODevice>>>;
-type GuestMemory = Vec<MemRegion>;
+/* Shared, so a device reading guest RAM from a frontend thread keeps
+ * its region mapped after the VM is gone. */
+type GuestMemory = Vec<Arc<MemRegion>>;
 
 pub trait MMIODevice: Send {
     fn handle(&mut self, mmio: &mut MMIO, mem: &GuestMemory) -> io::Result<()>;
@@ -265,8 +267,14 @@ impl DirtyLog {
     }
 }
 
-/* The mapping lives as long as the region, and the guest writes it
- * concurrently anyway; accesses go through volatile reads and writes. */
+impl Drop for DirtyLog {
+    fn drop(&mut self) {
+        unsafe { libc::close(self.vm_fd); }
+    }
+}
+
+/* The mapping lives as long as the last Arc to the region, and the
+ * guest writes it concurrently anyway; accesses go through volatile reads and writes. */
 unsafe impl Send for MemRegion {}
 unsafe impl Sync for MemRegion {}
 
@@ -326,7 +334,7 @@ impl VM {
         let slot = self.next_slot;
         self.next_slot += 1;
         self.set_user_memory_region(slot, 0, guest_phys_addr, mem_size as u64, mem_ptr as u64)?;
-        self.guest_memory.push(MemRegion { mem_ptr, mem_size, guest_phys_addr, slot: Some(slot) });
+        self.guest_memory.push(Arc::new(MemRegion { mem_ptr, mem_size, guest_phys_addr, slot: Some(slot) }));
 
         Ok(self.guest_memory.len() - 1)
     }
@@ -374,9 +382,16 @@ impl VM {
                 logged = Some(slot);
             }
         }
-        self.guest_memory[idx].slot = None;
+        Arc::get_mut(&mut self.guest_memory[idx])
+            .ok_or(io::Error::other("Memory region is already shared."))?
+            .slot = None;
 
-        Ok(DirtyLog { vm_fd: self.fd, slot: logged.unwrap(), pages: ((end - start) / PAGE_SIZE) as usize })
+        /* Its own fd, as frontends may fetch it after the VM is dropped. */
+        let vm_fd = unsafe { libc::dup(self.fd) };
+        if vm_fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(DirtyLog { vm_fd, slot: logged.unwrap(), pages: ((end - start) / PAGE_SIZE) as usize })
     }
 
     fn load_data_to_memory(&self, mem_region_idx: usize, data: Vec<u8>, offset: u64) -> io::Result<usize> {

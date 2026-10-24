@@ -2,7 +2,7 @@ use std::io::{ self };
 use std::sync::{ Arc, Mutex };
 use std::time::Instant;
 use std::ops::Range;
-use crate::{ IO, IODevice, Display, DirtyLog, read_guest_ptr, KVM_EXIT_IO_IN, KVM_EXIT_IO_OUT, PAGE_SIZE };
+use crate::{ IO, IODevice, Display, DirtyLog, MemRegion, read_guest_ptr, KVM_EXIT_IO_IN, KVM_EXIT_IO_OUT, PAGE_SIZE };
 
 /* A VGA adapter showing mode 13h: 320x200, a byte per pixel indexing
  * the 256-colour DAC palette, framebuffer linear at 0xA0000. The
@@ -79,6 +79,9 @@ pub struct Vga {
     epoch: Instant,
     /* None when guest RAM does not cover the framebuffer */
     framebuffer: Option<*const u8>,
+    /* The region the framebuffer points into, kept mapped for the
+     * frontends, which can outlive the VM; None in the tests. */
+    _region: Option<Arc<MemRegion>>,
     /* None counts every page as written in every frame. */
     dirty_log: Option<DirtyLog>,
     /* Frames are counted by render, which notes the frame each page
@@ -89,12 +92,13 @@ pub struct Vga {
     repaint: bool
 }
 
-/* The framebuffer points into a MemRegion, which outlives the devices
- * and is written by the guest concurrently anyway; see MemRegion. */
+/* The framebuffer points into _region, and is written by the guest
+ * concurrently anyway; see MemRegion. */
 unsafe impl Send for Vga {}
 
 impl Vga {
-    pub fn new(framebuffer: Option<*const u8>, dirty_log: Option<DirtyLog>) -> Arc<Mutex<Self>> {
+    pub fn new(framebuffer: Option<*const u8>, region: Option<Arc<MemRegion>>,
+               dirty_log: Option<DirtyLog>) -> Arc<Mutex<Self>> {
         Arc::new(Mutex::new(Self {
             misc: 0,
             seq_index: 0,
@@ -112,6 +116,7 @@ impl Vga {
             dac_reading: false,
             epoch: Instant::now(),
             framebuffer,
+            _region: region,
             dirty_log,
             frame: 0,
             page_written: [0; FRAMEBUFFER_PAGES],
@@ -281,7 +286,7 @@ mod tests {
         let mut fb = vec![0u8; VGA_FRAMEBUFFER_SIZE];
         fb[0] = 1;
         fb[VGA_FRAMEBUFFER_SIZE - 1] = 2;
-        let vga = Vga::new(Some(fb.as_ptr()), None);
+        let vga = Vga::new(Some(fb.as_ptr()), None, None);
         let mut out = vec![0x123456u32; VGA_FRAMEBUFFER_SIZE];
         let mut seen = 0;
 
@@ -318,7 +323,7 @@ mod tests {
     #[test]
     fn written_pages() {
         let fb = vec![0u8; VGA_FRAMEBUFFER_SIZE];
-        let vga = Vga::new(Some(fb.as_ptr()), None);
+        let vga = Vga::new(Some(fb.as_ptr()), None, None);
         let mut v = vga.lock().unwrap();
         /* With no log, every page in every frame */
         assert_eq!(v.written_pages(0), Some(0..FRAMEBUFFER_PAGES));
@@ -326,7 +331,7 @@ mod tests {
         assert_eq!(v.written_pages(seen), Some(0..FRAMEBUFFER_PAGES));
 
         /* Without a framebuffer only a repaint changes anything. */
-        let vga = Vga::new(None, None);
+        let vga = Vga::new(None, None, None);
         let mut v = vga.lock().unwrap();
         assert_eq!(v.written_pages(0), Some(0..FRAMEBUFFER_PAGES));
         let seen = v.frame;
