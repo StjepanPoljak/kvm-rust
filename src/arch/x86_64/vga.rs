@@ -1,5 +1,6 @@
 use std::io::{ self };
 use std::sync::{ Arc, Mutex };
+use std::time::Instant;
 use crate::{ IO, IODevice, Display, read_guest_ptr, KVM_EXIT_IO_IN, KVM_EXIT_IO_OUT };
 
 /* A VGA adapter showing mode 13h: 320x200, a byte per pixel indexing
@@ -38,6 +39,17 @@ const INSTAT_DD: u8 = 0x01;
 const INSTAT_VR: u8 = 0x08;
 const DAC_STATE_READ: u8 = 0x03;
 
+/* The 640x400 timing mode 13h is scanned out with (each pixel doubled):
+ * a 25.175 MHz dot clock, 800 dots by 449 lines a frame, so 70.086 Hz.
+ * The display is enabled for 640 dots of each line and the first 400
+ * lines; vertical sync takes 2 lines after a 12-line front porch. */
+const DOT_CLOCK_KHZ: u128 = 25_175;
+const DOTS_PER_LINE: u128 = 800;
+const LINES_PER_FRAME: u128 = 449;
+const VISIBLE_DOTS: u128 = 640;
+const VISIBLE_LINES: u128 = 400;
+const VSYNC_LINES: std::ops::Range<u128> = 412..414;
+
 pub struct Vga {
     misc: u8,
     seq_index: u8,
@@ -55,9 +67,9 @@ pub struct Vga {
     dac_write: (u8, usize),
     dac_read: (u8, usize),
     dac_reading: bool,
-    /* Toggled by every read of INSTAT_READ: there is no real refresh,
-     * so a guest waiting for retrace sees one soon. */
-    retrace: bool,
+    /* There is no beam; its position is derived from the time since
+     * this, so retrace and blanking come at the real rate. */
+    epoch: Instant,
     /* None when guest RAM does not cover the framebuffer */
     framebuffer: Option<*const u8>
 }
@@ -83,7 +95,7 @@ impl Vga {
             dac_write: (0, 0),
             dac_read: (0, 0),
             dac_reading: false,
-            retrace: false,
+            epoch: Instant::now(),
             framebuffer
         }))
     }
@@ -142,11 +154,24 @@ impl Vga {
             CRTC_DATA => self.crtc[self.crtc_index as usize],
             INSTAT_READ => {
                 self.ac_data_next = false;
-                self.retrace = !self.retrace;
-                if self.retrace { INSTAT_DD | INSTAT_VR } else { 0 }
+                self.input_status()
             },
             _ => 0xff
         }
+    }
+
+    fn input_status(&self) -> u8 {
+        let dot = self.epoch.elapsed().as_nanos() * DOT_CLOCK_KHZ / 1_000_000
+            % (DOTS_PER_LINE * LINES_PER_FRAME);
+        let (line, column) = (dot / DOTS_PER_LINE, dot % DOTS_PER_LINE);
+        let mut status = 0;
+        if line >= VISIBLE_LINES || column >= VISIBLE_DOTS {
+            status |= INSTAT_DD;
+        }
+        if VSYNC_LINES.contains(&line) {
+            status |= INSTAT_VR;
+        }
+        status
     }
 
     /* 0x00RRGGBB, each 6-bit component widened to 8 bits */
