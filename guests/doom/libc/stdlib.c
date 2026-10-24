@@ -181,11 +181,11 @@ void qsort(void *base, size_t n, size_t size, int (*cmp)(const void *, const voi
 
 _Noreturn void exit(int code)
 {
-	pv_power_off(code);
+	power_off(code);
 }
 
 _Noreturn void abort(void)
 {
 	puts("abort()");
-	pv_power_off(134);
+	power_off(134);
 }

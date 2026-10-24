@@ -94,7 +94,7 @@ static void setup_memory(const struct hvm_start_info *si)
 			end = map[i].addr + map[i].size;
 	if (!end) {
 		puts("[kvm] no RAM above the image");
-		pv_power_off(1);
+		power_off(1);
 	}
 
 	heap_init(start, end);
@@ -108,13 +108,13 @@ static uint32_t frames, frames_reported_at;
 
 void DG_Init(void)
 {
-	frames_reported_at = pv_clock_ms();
+	frames_reported_at = clock_ms();
 }
 
 /* No display yet: report the frame rate once a second instead. */
 void DG_DrawFrame(void)
 {
-	uint32_t now = pv_clock_ms();
+	uint32_t now = clock_ms();
 	frames++;
 	if (now - frames_reported_at >= 1000) {
 		printf("[kvm] %u frames in %u ms\n", frames, now - frames_reported_at);
@@ -125,12 +125,12 @@ void DG_DrawFrame(void)
 
 void DG_SleepMs(uint32_t ms)
 {
-	pv_sleep_ms(ms);
+	sleep_ms(ms);
 }
 
 uint32_t DG_GetTicksMs(void)
 {
-	return pv_clock_ms();
+	return clock_ms();
 }
 
 /* No keyboard yet. */
@@ -153,9 +153,10 @@ void kmain(uint32_t start_info_paddr)
 	puts("[kvm] doom guest started");
 	if (si->magic != XEN_HVM_START_MAGIC) {
 		printf("[kvm] bad PVH start info magic %#x\n", si->magic);
-		pv_power_off(1);
+		power_off(1);
 	}
 	setup_memory(si);
+	clock_init();
 
 	/* User options come first: Doom takes the first match of an option,
 	 * so they override the defaults after them. -mb sizes Doom's zone. */

@@ -30,7 +30,7 @@ DOOM_OBJS := dummy am_map doomdef doomstat dstrings d_event d_items d_iwad \
 	sounds statdump st_lib st_stuff s_sound tables v_video wi_stuff \
 	w_checksum w_file w_main w_wad z_zone w_file_stdc i_input i_video \
 	doomgeneric
-LIBC_OBJS := ctype stdio stdlib string sys
+LIBC_OBJS := clock ctype stdio stdlib string sys
 
 OBJS := $(BUILD)/boot.o $(BUILD)/kvm.o \
 	$(addprefix $(BUILD)/libc/, $(addsuffix .o, $(LIBC_OBJS))) \

@@ -13,28 +13,22 @@ void serial_putc(char c)
 	outb(SERIAL_DATA, c);
 }
 
-uint32_t pv_clock_ms(void)
+/* Until there is ACPI PM1a_CNT to write to: an empty IDT makes the int3
+ * a triple fault, which the VMM reports as "Guest shutdown" and stops.
+ * The exit code only gets printed. */
+_Noreturn void power_off(int code)
 {
-	return inl(PV_CLOCK_MS);
-}
+	static const struct { uint16_t limit; uint64_t base; } __attribute__((packed)) no_idt;
 
-void pv_sleep_ms(uint32_t ms)
-{
-	outl(PV_SLEEP_MS, ms);
-}
-
-_Noreturn void pv_power_off(int code)
-{
-	outl(PV_POWER_OFF, (uint32_t)code);
-	/* The VMM stops this vcpu before it gets here. */
-	for (;;)
-		__asm__ volatile("hlt");
+	printf("[kvm] power off (exit code %d)\n", code);
+	__asm__ volatile("lidt %0; int3" : : "m"(no_idt));
+	__builtin_unreachable();
 }
 
 _Noreturn void __assert_fail(const char *expr, const char *file, int line)
 {
 	printf("assertion failed: %s (%s:%d)\n", expr, file, line);
-	pv_power_off(134);
+	power_off(134);
 }
 
 /* There is nowhere to create or change files. */

@@ -1,8 +1,8 @@
 #ifndef _KVM_H
 #define _KVM_H
 
-/* What this libc needs from the VMM: the serial port, the paravirt ports
- * (src/arch/x86_64/paravirt.rs) and memory to manage. */
+/* What this libc needs from the platform: the serial port, a clock
+ * (the KVM pvclock, clock.c) and memory to manage. */
 
 #include <stddef.h>
 #include <stdint.h>
@@ -10,10 +10,6 @@
 #define SERIAL_DATA	0x3f8
 #define SERIAL_LSR	0x3fd
 #define SERIAL_LSR_THRE	0x20
-
-#define PV_CLOCK_MS	0x600
-#define PV_SLEEP_MS	0x604
-#define PV_POWER_OFF	0x608
 
 static inline void outb(uint16_t port, uint8_t val)
 {
@@ -40,9 +36,12 @@ static inline uint32_t inl(uint16_t port)
 }
 
 void serial_putc(char c);
-uint32_t pv_clock_ms(void);
-void pv_sleep_ms(uint32_t ms);
-_Noreturn void pv_power_off(int code);
+/* Milliseconds and nanoseconds since clock_init(). */
+void clock_init(void);
+uint64_t clock_ns(void);
+uint32_t clock_ms(void);
+void sleep_ms(uint32_t ms);
+_Noreturn void power_off(int code);
 
 /* The heap is [start, end); the platform calls this before any malloc. */
 void heap_init(uintptr_t start, uintptr_t end);
