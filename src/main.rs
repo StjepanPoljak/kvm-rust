@@ -135,7 +135,11 @@ pub struct Args {
 
     /// Tap interface name
     #[arg(long)]
-    tap: Option<String>
+    tap: Option<String>,
+
+    /// Extra kernel command line arguments (x86; on aarch64 the DTB has them)
+    #[arg(long)]
+    append: Option<String>
 }
 
 /* Returns the size in bytes. */
