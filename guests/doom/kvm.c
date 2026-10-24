@@ -1,5 +1,5 @@
 /*
- * doomgeneric platform layer for the KVM Rust VMM. Entered from boot.S
+ * doomgeneric platform layer for the Hearth VMM. Entered from boot.S
  * with the PVH start info. Modules passed with --initramfs show up as
  * files named after their command line (the VMM puts the file name
  * there), so `--initramfs freedoom1.wad` is found by Doom's IWAD search.

@@ -1,4 +1,4 @@
-# Bare-metal Doom for the KVM Rust VMM: doomgeneric, a small libc and a
+# Bare-metal Doom for the Hearth VMM: doomgeneric, a small libc and a
 # PVH entry stub, linked into one ELF that the VMM boots with --kernel.
 #
 #   make            fetch doomgeneric and Freedoom if needed, build doom.elf
@@ -14,7 +14,7 @@ DOOMGENERIC_REV	:= e257a09527062bfb986b6e5e0780839b6cbd5b71
 FREEDOOM_VER	:= 0.13.0
 FREEDOOM_URL	:= https://github.com/freedoom/freedoom/releases/download/v$(FREEDOOM_VER)/freedoom-$(FREEDOOM_VER).zip
 WAD		:= $(ROOT)/build/wad/freedoom-$(FREEDOOM_VER)/freedoom1.wad
-VMM		:= $(ROOT)/target/debug/rust
+VMM		:= $(ROOT)/target/debug/hearth
 
 CC		:= gcc
 SRC		:= $(DOOMGENERIC)/doomgeneric

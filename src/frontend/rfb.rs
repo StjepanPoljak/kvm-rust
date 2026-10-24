@@ -17,7 +17,7 @@ use std::sync::mpsc::{ self, Receiver, RecvTimeoutError, Sender };
 use std::time::Duration;
 
 const UPDATE_INTERVAL: Duration = Duration::from_millis(1000 / 60);
-const DESKTOP_NAME: &[u8] = b"KVM Rust";
+const DESKTOP_NAME: &[u8] = b"Hearth";
 /* Shown, in black, while the VM has no display device. */
 const NO_DISPLAY_SIZE: (u16, u16) = (320, 200);
 

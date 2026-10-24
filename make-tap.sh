@@ -5,7 +5,7 @@
 # Usage: sudo ./make-tap.sh [up|down] [tap-name] [host-ip/prefix]
 #
 # The tap is owned by the user who invoked sudo, so the VMM can attach to it
-# without root: ./rust ... --tap tap0
+# without root: ./hearth ... --tap tap0
 # In the guest: ip addr add 192.168.100.2/24 dev eth0 && ip link set eth0 up
 
 set -e

@@ -644,7 +644,7 @@ fn main() -> io::Result<()> {
 
     let mut vcpu = vm.create_vcpu(0, kvm_dev.get_kvm_run_size())?;
 
-    println!("\nKVM Rust\r");
+    println!("\nHearth\r");
 
     arch::arch_init(&kvm_dev, &mut vm, &mut vcpu)?;
 
