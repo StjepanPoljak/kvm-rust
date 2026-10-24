@@ -97,11 +97,13 @@ impl VmControl {
 }
 
 const KVM_CREATE_VM: libc::Ioctl = _IO(KVMIO, 0x01);
+const KVM_CHECK_EXTENSION: libc::Ioctl = _IO(KVMIO, 0x03);
 const KVM_CREATE_VCPU: libc::Ioctl = _IO(KVMIO, 0x41);
 const KVM_GET_VCPU_MMAP_SIZE: libc::Ioctl = _IO(KVMIO, 0x04);
 
 const KVM_SET_USER_MEMORY_REGION: libc::Ioctl = _IOW::<kvm_userspace_memory_region>(KVMIO, 0x46);
 const KVM_GET_DIRTY_LOG: libc::Ioctl = _IOW::<kvm_dirty_log>(KVMIO, 0x42);
+const KVM_REGISTER_COALESCED_MMIO: libc::Ioctl = _IOW::<kvm_coalesced_mmio_zone>(KVMIO, 0x67);
 const PAGE_SIZE: u64 = 4096;
 const KVM_RUN: libc::Ioctl = _IO(KVMIO, 0x80);
 
@@ -273,6 +275,48 @@ impl Drop for DirtyLog {
     }
 }
 
+/* Writes KVM queued instead of exiting to us, see VM::coalesce_pio().
+ * KVM appends at `last` and the reader frees entries by advancing
+ * `first`; when the ring is full, a write exits as usual. The ring is
+ * the VM's, so it has one reader, which must apply what is queued
+ * before handling an exit for the same ports, or writes reorder. */
+pub struct CoalescedRing {
+    ring: *mut kvm_coalesced_mmio_ring
+}
+
+/* Only the reader touches `first`, and it is behind the device's lock. */
+unsafe impl Send for CoalescedRing {}
+
+impl CoalescedRing {
+    const ENTRIES: u32 = ((PAGE_SIZE as usize - std::mem::size_of::<kvm_coalesced_mmio_ring>())
+                          / std::mem::size_of::<kvm_coalesced_mmio>()) as u32;
+
+    /* Calls write(port, data) for each queued write, oldest first. */
+    pub fn drain(&self, mut write: impl FnMut(u64, &[u8])) {
+        let first = unsafe { std::ptr::addr_of_mut!((*self.ring).first) };
+        let last = unsafe { std::ptr::addr_of!((*self.ring).last) };
+        let entries = unsafe { (*self.ring).__bindgen_anon_1.coalesced_mmio.as_ptr() };
+        let mut i = read_guest_ptr::<u32>(first.cast());
+        /* Entries up to `last` are complete once it is read. */
+        let end = read_guest_ptr::<u32>(last.cast());
+        std::sync::atomic::fence(Ordering::Acquire);
+        while i != end {
+            let entry = unsafe { std::ptr::read_volatile(entries.add(i as usize)) };
+            write(entry.phys_addr, &entry.data[..(entry.len as usize).min(entry.data.len())]);
+            i = (i + 1) % Self::ENTRIES;
+        }
+        /* KVM may reuse the entries once `first` passes them. */
+        std::sync::atomic::fence(Ordering::Release);
+        write_guest_ptr::<u32>(first.cast(), end);
+    }
+}
+
+impl Drop for CoalescedRing {
+    fn drop(&mut self) {
+        unsafe { libc::munmap(self.ring.cast(), PAGE_SIZE as usize); }
+    }
+}
+
 /* The mapping lives as long as the last Arc to the region, and the
  * guest writes it concurrently anyway; accesses go through volatile reads and writes. */
 unsafe impl Send for MemRegion {}
@@ -394,6 +438,39 @@ impl VM {
         Ok(DirtyLog { vm_fd, slot: logged.unwrap(), pages: ((end - start) / PAGE_SIZE) as usize })
     }
 
+    /* Makes KVM queue the guest's writes to ports..ports + len in the
+     * returned ring rather than exit for each; reads still exit. None
+     * if KVM can't. Once per VM: the ring is shared by every zone. It
+     * is mapped through a vcpu, and on its own, so a frontend can keep
+     * reading it after the vcpus are gone. */
+    pub fn coalesce_pio(&self, vcpu: &VCPU, port: u16, len: u32) -> io::Result<Option<CoalescedRing>> {
+        let supported = unsafe { libc::ioctl(self.fd, KVM_CHECK_EXTENSION, KVM_CAP_COALESCED_PIO as usize) };
+        if supported <= 0 {
+            return Ok(None);
+        }
+        let zone = kvm_coalesced_mmio_zone {
+            addr: port as u64,
+            size: len,
+            __bindgen_anon_1: kvm_coalesced_mmio_zone__bindgen_ty_1 { pio: 1 }
+        };
+        let ret = unsafe { libc::ioctl(self.fd, KVM_REGISTER_COALESCED_MMIO, &zone) };
+        if ret < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let ring = unsafe {
+            libc::mmap(std::ptr::null_mut(),
+                       PAGE_SIZE as usize,
+                       libc::PROT_READ|libc::PROT_WRITE,
+                       libc::MAP_SHARED,
+                       vcpu.fd,
+                       (KVM_COALESCED_MMIO_PAGE_OFFSET as u64 * PAGE_SIZE) as libc::off_t)
+        };
+        if ring == libc::MAP_FAILED {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Some(CoalescedRing { ring: ring.cast() }))
+    }
+
     fn load_data_to_memory(&self, mem_region_idx: usize, data: Vec<u8>, offset: u64) -> io::Result<usize> {
         let mem_region = self.guest_memory
             .get(mem_region_idx)
@@ -434,8 +511,8 @@ impl VM {
         self.arch_init_mmio_devices(args)
     }
 
-    fn init_io_devices(&mut self) -> io::Result<()> {
-        self.arch_init_io_devices()
+    fn init_io_devices(&mut self, vcpu: &VCPU) -> io::Result<()> {
+        self.arch_init_io_devices(vcpu)
     }
 
     fn add_mmio_device(&mut self, addr: u64, device: Arc<Mutex<dyn MMIODevice>>) {
@@ -663,7 +740,7 @@ fn main() -> io::Result<()> {
     let saved_tty = save_tty();
 
     vm.init_mmio_devices(&args)?;
-    vm.init_io_devices()?;
+    vm.init_io_devices(&vcpu)?;
     if let Some(addr) = &args.vnc {
         start_rfb(addr.as_str(), vm.display.clone(), vm.keyboard.clone())?;
     }

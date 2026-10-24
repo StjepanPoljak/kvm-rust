@@ -2,7 +2,7 @@ use std::io::{ self };
 use std::sync::{ Arc, Mutex };
 use std::time::Instant;
 use std::ops::Range;
-use crate::{ IO, IODevice, Display, DirtyLog, MemRegion, read_guest_ptr, KVM_EXIT_IO_IN, KVM_EXIT_IO_OUT, PAGE_SIZE };
+use crate::{ IO, IODevice, Display, DirtyLog, CoalescedRing, MemRegion, read_guest_ptr, KVM_EXIT_IO_IN, KVM_EXIT_IO_OUT, PAGE_SIZE };
 
 /* A VGA adapter showing mode 13h: 320x200, a byte per pixel indexing
  * the 256-colour DAC palette, framebuffer linear at 0xA0000. The
@@ -13,10 +13,17 @@ use crate::{ IO, IODevice, Display, DirtyLog, MemRegion, read_guest_ptr, KVM_EXI
  *
  * Which rows changed comes from KVM's dirty log of the framebuffer's
  * pages, so a frontend never compares frames; a palette change or the
- * display going on or off redraws them all. */
+ * display going on or off redraws them all.
+ *
+ * A palette is 768 writes to the DAC, which a guest like Doom loads on
+ * every tic of a screen flash. KVM queues writes to the DAC ports in a
+ * ring instead of exiting for each, and they are applied, in order,
+ * before any other register access and before each frame. */
 
 pub const VGA_PORTS: std::ops::RangeInclusive<u16> = 0x3c0..=0x3df;
 pub const VGA_FRAMEBUFFER: u64 = 0xa0000;
+/* Write index and data: their writes only change the palette. */
+pub const VGA_DAC_WRITE_PORTS: (u16, u32) = (DAC_WRITE_INDEX, 2);
 const WIDTH: usize = 320;
 const HEIGHT: usize = 200;
 pub const VGA_FRAMEBUFFER_SIZE: usize = WIDTH * HEIGHT;
@@ -84,6 +91,8 @@ pub struct Vga {
     _region: Option<Arc<MemRegion>>,
     /* None counts every page as written in every frame. */
     dirty_log: Option<DirtyLog>,
+    /* DAC writes KVM has queued; None when it exits for each. */
+    dac_writes: Option<CoalescedRing>,
     /* Frames are counted by render, which notes the frame each page
      * was last written in. */
     frame: u64,
@@ -98,7 +107,7 @@ unsafe impl Send for Vga {}
 
 impl Vga {
     pub fn new(framebuffer: Option<*const u8>, region: Option<Arc<MemRegion>>,
-               dirty_log: Option<DirtyLog>) -> Arc<Mutex<Self>> {
+               dirty_log: Option<DirtyLog>, dac_writes: Option<CoalescedRing>) -> Arc<Mutex<Self>> {
         Arc::new(Mutex::new(Self {
             misc: 0,
             seq_index: 0,
@@ -118,10 +127,21 @@ impl Vga {
             framebuffer,
             _region: region,
             dirty_log,
+            dac_writes,
             frame: 0,
             page_written: [0; FRAMEBUFFER_PAGES],
             repaint: false
         }))
+    }
+
+    fn apply_queued_writes(&mut self) {
+        let Some(ring) = self.dac_writes.take() else { return };
+        ring.drain(|port, data| {
+            for (i, &byte) in data.iter().enumerate() {
+                self.write(port as u16 + i as u16, byte);
+            }
+        });
+        self.dac_writes = Some(ring);
     }
 
     fn write(&mut self, port: u16, byte: u8) {
@@ -235,6 +255,7 @@ impl IODevice for Vga {
      * is a byte access to port and port + 1; a rep string access repeats
      * on the same port. */
     fn handle(&mut self, io: &IO, base: *mut u8) -> io::Result<()> {
+        self.apply_queued_writes();
         let size = io.size as usize;
         let data = unsafe { std::slice::from_raw_parts_mut(base.add(io.data_offset as usize), size * io.count as usize) };
         for access in data.chunks_mut(size) {
@@ -260,6 +281,7 @@ impl Display for Mutex<Vga> {
     fn render(&self, out: &mut [u32], seen: &mut u64) -> Option<Range<usize>> {
         let (pages, palette, framebuffer) = {
             let mut vga = self.lock().unwrap();
+            vga.apply_queued_writes();
             let pages = vga.written_pages(*seen);
             *seen = vga.frame;
             (pages?, vga.palette_rgb(), vga.framebuffer.filter(|_| vga.ac_index & AC_PAS != 0))
@@ -286,7 +308,7 @@ mod tests {
         let mut fb = vec![0u8; VGA_FRAMEBUFFER_SIZE];
         fb[0] = 1;
         fb[VGA_FRAMEBUFFER_SIZE - 1] = 2;
-        let vga = Vga::new(Some(fb.as_ptr()), None, None);
+        let vga = Vga::new(Some(fb.as_ptr()), None, None, None);
         let mut out = vec![0x123456u32; VGA_FRAMEBUFFER_SIZE];
         let mut seen = 0;
 
@@ -320,10 +342,70 @@ mod tests {
         assert_eq!(out[VGA_FRAMEBUFFER_SIZE - 1], 0x00ff04);
     }
 
+    /* A ring as KVM fills it: entries from `first` up to `last`. */
+    fn queue(writes: &[(u16, &[u8])]) -> CoalescedRing {
+        let page = unsafe {
+            libc::mmap(std::ptr::null_mut(), PAGE_SIZE as usize, libc::PROT_READ|libc::PROT_WRITE,
+                       libc::MAP_PRIVATE|libc::MAP_ANONYMOUS, -1, 0)
+        };
+        assert_ne!(page, libc::MAP_FAILED);
+        let ring = CoalescedRing { ring: page.cast() };
+        unsafe {
+            let entries = (*ring.ring).__bindgen_anon_1.coalesced_mmio.as_mut_ptr();
+            for (i, (port, data)) in writes.iter().enumerate() {
+                let entry = &mut *entries.add(i);
+                entry.phys_addr = *port as u64;
+                entry.len = data.len() as u32;
+                entry.data[..data.len()].copy_from_slice(data);
+            }
+            (*ring.ring).last = writes.len() as u32;
+        }
+        ring
+    }
+
+    #[test]
+    fn queued_dac_writes() {
+        let fb = vec![0u8; VGA_FRAMEBUFFER_SIZE];
+        /* Entry 7 and the first component of 8; then a word write sets
+         * the index, and its second byte goes to the data port. */
+        let ring = queue(&[(DAC_WRITE_INDEX, &[7]), (DAC_DATA, &[0x3f]), (DAC_DATA, &[0x01]),
+                           (DAC_DATA, &[0x02]), (DAC_DATA, &[0x03]),
+                           (DAC_WRITE_INDEX, &[9, 0x11])]);
+        let page = ring.ring;
+        let vga = Vga::new(Some(fb.as_ptr()), None, None, Some(ring));
+
+        /* Applied before a register access... */
+        {
+            let mut v = vga.lock().unwrap();
+            v.apply_queued_writes();
+            assert_eq!(v.palette[7], [0x3f, 0x01, 0x02]);
+            assert_eq!(v.palette[8][0], 0x03);
+            assert_eq!(v.palette[9][0], 0x11);
+            assert_eq!(unsafe { (*page).first }, 6);
+            v.write(DAC_WRITE_INDEX, 0);
+            v.write(DAC_DATA, 0x20);
+        }
+        /* ...and before a frame; already applied ones are not again. */
+        unsafe {
+            let entry = &mut *(*page).__bindgen_anon_1.coalesced_mmio.as_mut_ptr().add(6);
+            entry.phys_addr = DAC_DATA as u64;
+            entry.len = 1;
+            entry.data[0] = 0x21;
+            (*page).last = 7;
+        }
+        let mut out = vec![0u32; VGA_FRAMEBUFFER_SIZE];
+        let mut seen = 0;
+        vga.render(&mut out, &mut seen);
+        let v = vga.lock().unwrap();
+        assert_eq!(v.palette[0][..2], [0x20, 0x21]);
+        assert_eq!(v.palette[7], [0x3f, 0x01, 0x02]);
+        assert_eq!(unsafe { (*page).first }, 7);
+    }
+
     #[test]
     fn written_pages() {
         let fb = vec![0u8; VGA_FRAMEBUFFER_SIZE];
-        let vga = Vga::new(Some(fb.as_ptr()), None, None);
+        let vga = Vga::new(Some(fb.as_ptr()), None, None, None);
         let mut v = vga.lock().unwrap();
         /* With no log, every page in every frame */
         assert_eq!(v.written_pages(0), Some(0..FRAMEBUFFER_PAGES));
@@ -331,7 +413,7 @@ mod tests {
         assert_eq!(v.written_pages(seen), Some(0..FRAMEBUFFER_PAGES));
 
         /* Without a framebuffer only a repaint changes anything. */
-        let vga = Vga::new(None, None, None);
+        let vga = Vga::new(None, None, None, None);
         let mut v = vga.lock().unwrap();
         assert_eq!(v.written_pages(0), Some(0..FRAMEBUFFER_PAGES));
         let seen = v.frame;
