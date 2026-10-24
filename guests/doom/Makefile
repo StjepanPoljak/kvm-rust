@@ -2,7 +2,8 @@
 # PVH entry stub, linked into one ELF that the VMM boots with --kernel.
 #
 #   make            fetch doomgeneric and Freedoom if needed, build doom.elf
-#   make run        boot it (from the repository root's target/debug)
+#   make run        boot it (from the repository root's target/debug), with
+#                   the display on VNC at $(VNC)
 #
 # Downloads and build output go to the repository's build/ directory.
 
@@ -15,6 +16,7 @@ FREEDOOM_VER	:= 0.13.0
 FREEDOOM_URL	:= https://github.com/freedoom/freedoom/releases/download/v$(FREEDOOM_VER)/freedoom-$(FREEDOOM_VER).zip
 WAD		:= $(ROOT)/build/wad/freedoom-$(FREEDOOM_VER)/freedoom1.wad
 VMM		:= $(ROOT)/target/debug/hearth
+VNC		:= 127.0.0.1:5900
 
 CC		:= gcc
 SRC		:= $(DOOMGENERIC)/doomgeneric
@@ -90,7 +92,7 @@ $(BUILD):
 	mkdir -p $(BUILD)/libc $(BUILD)/doom
 
 run: all
-	$(VMM) --kernel $(BUILD)/doom.elf --initramfs $(WAD)
+	$(VMM) --kernel $(BUILD)/doom.elf --initramfs $(WAD) --vnc $(VNC)
 
 clean:
 	rm -rf $(BUILD)
