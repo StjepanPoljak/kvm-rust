@@ -1,9 +1,10 @@
 use std::io::{ self, Write };
-use crate::{ VM, IO, IODevice, KVMIO, TTY, VmControl, start_tty, kvm_irq_level, KVM_EXIT_IO_IN, KVM_EXIT_IO_OUT };
+use crate::{ VM, IO, IODevice, KVMIO, TTY, VmControl, start_tty, kvm_irq_level, gpa_to_host, KVM_EXIT_IO_IN, KVM_EXIT_IO_OUT };
 use std::sync::{ Arc, Mutex };
 use libc::_IOW;
 use std::collections::VecDeque;
 use super::i8042::{ I8042, I8042_DATA, I8042_COMMAND };
+use super::vga::{ Vga, VGA_PORTS, VGA_FRAMEBUFFER, VGA_FRAMEBUFFER_SIZE };
 
 const KVM_IRQ_LINE: libc::Ioctl = _IOW::<kvm_irq_level>(KVMIO, 0x61);
 
@@ -131,6 +132,7 @@ impl IODevice for UART {
 pub enum DeviceId {
     Uart = 0u64,
     I8042 = 1u64,
+    Vga = 2u64,
     Unknown = !(0u64)
 }
 
@@ -141,6 +143,10 @@ impl VM {
         let i8042 = I8042::new(self.fd, self.control.clone());
         self.io_devices.insert(DeviceId::I8042 as u64, i8042.clone() as Arc<Mutex<dyn IODevice>>);
         self.keyboard = Some(i8042);
+        let framebuffer = gpa_to_host(&self.guest_memory, VGA_FRAMEBUFFER, VGA_FRAMEBUFFER_SIZE);
+        let vga = Vga::new(framebuffer.map(|p| p as *const u8));
+        self.io_devices.insert(DeviceId::Vga as u64, vga.clone() as Arc<Mutex<dyn IODevice>>);
+        self.display = Some(vga);
         Ok(())
     }
 
@@ -148,6 +154,7 @@ impl VM {
         let dev: DeviceId = match io.port {
             0x3f8..=0x3ff => DeviceId::Uart,
             I8042_DATA | I8042_COMMAND => DeviceId::I8042,
+            port if VGA_PORTS.contains(&port) => DeviceId::Vga,
             _ => DeviceId::Unknown
         };
         if let Some(device) = self.io_devices.get(&(dev as u64)) {
